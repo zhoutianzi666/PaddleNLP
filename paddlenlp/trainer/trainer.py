@@ -1140,7 +1140,10 @@ class Trainer:
                         fused_allreduce_gradients_no_sync(list(model.parameters()), None)
 
                     # Pipeline parallel mode,  handle gradient reduce here to overlap
-                    enable_dp_comm_overlap = "enable_dp_comm_overlap" in args.pipeline_parallel_config
+                    enable_dp_comm_overlap = (
+                        self.args.pipeline_parallel_degree > 1
+                        and "enable_dp_comm_overlap" in args.pipeline_parallel_config
+                    )
 
                     enable_release_grads = False
                     if args.sharding_parallel_degree > 1:
