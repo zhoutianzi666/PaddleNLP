@@ -42,7 +42,7 @@ unified_checkpoint_config: Optional[str] = field(
             "- master_weight_compatible: 1. if the master weights exist, only load when needed\n"
             "                            2. if master weights does not exist, convert model weights to master weights when needed\n"
             "- remove_master_weight, whether save master weight, if master_weights does not exist, convert model weights to master_weights when needed."
-            "- enable_all_options: enable all optimization configurations\n"
+            "- async_save: whether to use asynchronous saving."
         )
     },
 )
@@ -51,7 +51,7 @@ unified_checkpoint_config: Optional[str] = field(
 1. skip_save_model_weight：当 optimizer 具有 master weight 时，跳过 model weight 保存，重启时将 master weight 作为 model weight 加载。在 PaddleNLP 中，仅 fp16_opt_level=O1时，optimizer 不存在 master weight。
 2. master_weight_compatible：仅当 optimizer 需要 master weight 时，才加载 master weight; 如果 ckpt 中不存在 master weight，将 model weight 作为 master weight 加载。
 3. remove_master_weight: 是否保存 master weight, 如果 checkpoint 中不存在 master_weights，则将 model weight 作为 master_weights 进行加载。
-4. enable_all_options：上述参数均开启。
+4. async_save: 是否使用异步保存，加速存储速度。
 
 ### 2.2 Unified Checkpoint 存储格式介绍
 
