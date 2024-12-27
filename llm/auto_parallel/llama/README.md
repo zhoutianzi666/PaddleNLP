@@ -44,9 +44,9 @@ import paddle
 import paddle.distributed as dist
 
 ckpt_path='/path/for/dist_ckpt'
-# offload=1 将参数 offload 到 CPU，减少显存占用
+# offload=1, 参数 offload 到 CPU，减少显存占用
 merged_state_dict = dist.checkpoint.load_state_dict.load_merged_state_dict(ckpt_path, offload=1)
-paddle.save(unsharded_state_dict, 'model_state.pdparams')
+paddle.save(merged_state_dict, 'model_state.pdparams')
 
 # 上述合并的模型参数格式为Paddle原生格式，如需转换为unified_param格式(safetensors)，可继续执行如下代码：
 python PaddleNLP/llm/auto_parallel/utils/convert_to_safetensors.py --input_path input_path  [--output_path output_path] [--split_num split_num] [--offload offload]
