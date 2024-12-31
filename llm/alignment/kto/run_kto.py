@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Training DPO """
+""" Training KTO """
 
 import os
 import sys
@@ -20,18 +20,14 @@ import time
 from functools import partial
 
 import paddle
-from dpo_argument import (
-    DPOConfig,
-    DPODataArgument,
-    DPOModelArgument,
-    DPOTrainingArguments,
+from kto_argument import (
+    KTOConfig,
+    KTODataArgument,
+    KTOModelArgument,
+    KTOTrainingArguments,
 )
 
-from paddlenlp.datasets import (
-    ZeroPaddingIterableDataset,
-    ZeroPaddingMapDataset,
-    load_dataset,
-)
+from paddlenlp.datasets import ZeroPaddingMapDataset, load_dataset
 from paddlenlp.peft import LoRAConfig, LoRAModel
 from paddlenlp.trainer import PdArgumentParser, get_last_checkpoint, set_seed
 from paddlenlp.transformers import (
@@ -42,13 +38,12 @@ from paddlenlp.transformers import (
     LlamaForCausalLM,
     LlamaForCausalLMPipe,
     Qwen2ForCausalLM,
-    Qwen2ForCausalLMPipe,
     register_sequence_parallel_allreduce_hooks,
 )
 from paddlenlp.transformers.configuration_utils import LlmMetaConfig
 from paddlenlp.transformers.refined_recompute import update_refined_recompute
 from paddlenlp.trl import (
-    DPOTrainer,
+    KTOTrainer,
     calculate_effective_tokens,
     preference_collate_fn,
     preprocess_preference_data,
@@ -56,27 +51,19 @@ from paddlenlp.trl import (
 from paddlenlp.trl.llm_utils import get_lora_target_modules
 from paddlenlp.utils.log import logger
 
-flash_mask_support_list = [Qwen2ForCausalLM, Qwen2ForCausalLMPipe, LlamaForCausalLM, LlamaForCausalLMPipe]
+flash_mask_support_list = [Qwen2ForCausalLM, LlamaForCausalLM, LlamaForCausalLMPipe]
 
 
 def main():
     """main"""
-    parser = PdArgumentParser((DPOModelArgument, DPODataArgument, DPOTrainingArguments, DPOConfig))
+    parser = PdArgumentParser((KTOModelArgument, KTODataArgument, KTOTrainingArguments, KTOConfig))
     if len(sys.argv) >= 2 and sys.argv[1].endswith(".json"):
-        model_args, data_args, training_args, dpo_config = parser.parse_json_file_and_cmd_lines()
+        model_args, data_args, training_args, kto_config = parser.parse_json_file_and_cmd_lines()
     else:
-        model_args, data_args, training_args, dpo_config = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, kto_config = parser.parse_args_into_dataclasses()
 
     paddle.set_device(training_args.device)
     set_seed(training_args.seed)
-    if dpo_config.loss_type == "orpo":
-        dpo_config.reference_free = True
-        dpo_config.sft_loss_ratio = 1.0
-        dpo_config.loss_type = "or"
-        logger.info("orpo loss_type is equal to sft_loss + pref_loss_ratio * or_loss.")
-    if dpo_config.loss_type in ["or", "simpo"] and not dpo_config.reference_free:
-        dpo_config.reference_free = True
-        logger.warning(f"{dpo_config.loss_type} loss_type only supports reference_free. Set reference_free to True.")
     if training_args.pipeline_parallel_degree > 1:
         assert (
             hasattr(training_args, "pipeline_parallel_config")
@@ -93,7 +80,7 @@ def main():
             logger.info("Tensor_parallel_degree = 1. Set sequence_parallel to False.")
     training_args.print_config(model_args, "Model")
     training_args.print_config(data_args, "Data")
-    training_args.print_config(dpo_config, "DPOConfig")
+    training_args.print_config(kto_config, "KTOConfig")
 
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, world_size: "
@@ -119,42 +106,41 @@ def main():
             dtype = "bfloat16"
 
     logger.info("Start to load model & tokenizer.")
-
     model_config = AutoConfig.from_pretrained(model_args.model_name_or_path, dtype=dtype)
     LlmMetaConfig.set_llm_config(model_config, training_args)
     model_config.refined_recompute = update_refined_recompute(
         training_args.refined_recompute,
-        dpo_config.lora,
+        kto_config.lora,
     )
-    if not dpo_config.reference_free and not dpo_config.lora:
+    if not kto_config.lora:
         ref_model_config = AutoConfig.from_pretrained(model_args.model_name_or_path, dtype=dtype)
         LlmMetaConfig.set_llm_config(ref_model_config, training_args)
         ref_model_config.refined_recompute = update_refined_recompute(
             training_args.refined_recompute,
-            dpo_config.lora,
+            kto_config.lora,
         )
 
     if training_args.pipeline_parallel_degree > 1:
         model_class = AutoModelForCausalLMPipe
-        model_config.dpo_config = dpo_config
+        model_config.kto_config = kto_config
     else:
         model_class = AutoModelForCausalLM
     if not training_args.autotuner_benchmark or model_args.weight_quantize_algo is not None:
         model = model_class.from_pretrained(model_args.model_name_or_path, config=model_config)
-        # for DPO save
-        if not dpo_config.reference_free and not dpo_config.lora:
+        if not kto_config.lora:
             ref_model = model_class.from_config(ref_model_config)
             ref_model.set_state_dict(model.state_dict())
         else:
             ref_model = None
     else:
         model = model_class.from_config(model_config)
-        if not dpo_config.reference_free and not dpo_config.lora:
+        if not kto_config.lora:
             ref_model = model_class.from_config(ref_model_config)
         else:
             ref_model = None
     if training_args.pipeline_parallel_degree > 1:
-        model.config.dpo_config = None
+        model.config.kto_config = None
+
     if model_args.flash_mask and not model.config.use_flash_attention:
         logger.warning("`flash_mask` must use with zero padding and flash attention.")
         model.config.use_flash_attention = True
@@ -174,7 +160,7 @@ def main():
     tokenizer.chat_template = None
     logger.info("Loading model & tokenizer successfully !")
 
-    if dpo_config.lora:
+    if kto_config.lora:
         if training_args.sharding_parallel_degree > 1:
             assert (
                 "enable_stage1_overlap" not in training_args.sharding_parallel_config
@@ -212,26 +198,24 @@ def main():
 
     logger.info("Start to create dataset")
     trans_func = partial(preprocess_preference_data, tokenizer=tokenizer, data_args=data_args, model_args=model_args)
-    if data_args.lazy:
-        zero_padding_dataset = ZeroPaddingIterableDataset
-    else:
-        zero_padding_dataset = ZeroPaddingMapDataset
     if training_args.do_train and training_args.should_load_dataset:
         train_ds = load_dataset(
             "json",
             data_files=data_args.train_dataset_path,
-            lazy=data_args.lazy,
         )[0]
+
+        def add_response_kl(example, idx):
+            example["response"].append(train_ds[-idx]["response"][0])
+            example["sort"].append(example["sort"][0] - 1)
+            return example
+
+        train_ds.new_data = train_ds.new_data.map(add_response_kl, with_indices=True)
         logger.info("Creating train Zero Padding Data Stream. This may take a few minutes.")
-        train_ds = (
-            zero_padding_dataset(
-                train_ds.map(trans_func),
-                tokenizer=tokenizer,
-                max_length=data_args.max_seq_len,
-                greedy_zero_padding=data_args.greedy_zero_padding,
-            )
-            if train_ds is not None
-            else None
+        train_ds = ZeroPaddingMapDataset(
+            train_ds.map(trans_func),
+            tokenizer=tokenizer,
+            max_length=data_args.max_seq_len,
+            greedy_zero_padding=data_args.greedy_zero_padding,
         )
     else:
         train_ds = None
@@ -240,35 +224,33 @@ def main():
         eval_ds = load_dataset(
             "json",
             data_files=data_args.dev_dataset_path,
-            lazy=data_args.lazy,
         )[0]
+
+        def add_response_kl(example, idx):
+            example["response"].append(eval_ds[-idx]["response"][0])
+            example["sort"].append(example["sort"][0] - 1)
+            return example
+
+        eval_ds.new_data = eval_ds.new_data.map(add_response_kl, with_indices=True)
         logger.info("Creating dev Zero Padding Data Stream. This may take a few minutes.")
-        eval_ds = (
-            zero_padding_dataset(
-                eval_ds.map(trans_func),
-                tokenizer=tokenizer,
-                max_length=data_args.max_seq_len,
-            )
-            if eval_ds is not None
-            else None
+        eval_ds = ZeroPaddingMapDataset(
+            eval_ds.map(trans_func),
+            tokenizer=tokenizer,
+            max_length=data_args.max_seq_len,
         )
     else:
         eval_ds = None
     logger.info("Creating dataset successfully ...")
 
-    trainer = DPOTrainer(
+    trainer = KTOTrainer(
         model=model,
         ref_model=ref_model,
-        dpo_config=dpo_config,
+        kto_config=kto_config,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         tokenizer=tokenizer,
-        data_collator=partial(
-            preference_collate_fn,
-            max_seq_len=data_args.max_seq_len,
-        ),
-        ignore_eos_token=True,
+        data_collator=partial(preference_collate_fn, max_seq_len=data_args.max_seq_len, data_type="pointwise"),
     )
 
     if training_args.do_train:
