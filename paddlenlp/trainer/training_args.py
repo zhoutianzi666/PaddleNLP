@@ -727,7 +727,8 @@ class TrainingArguments:
                 "disable_stage1_reduce_avg, replace reduce_avg with original reduce_sum+scale in stage1, which can be used for accuracy verification.\n"
                 "enable_stage2_overlap, overlap stage2 NCCL communication with computation. There are some constraints for the overlap, such as the logging_step should be bigger than 1 for broadcast overlap and no other sync could be called during the training for broadcast overlap\n"
                 "enable_stage1_broadcast_overlap, overlap stage1 V1 broadcast with next step forward computation. There are some constraints for the overlap, such as the logging_step should be bigger than 1 for broadcast overlap forward compute and no other sync could be called during the training for broadcast overlap.\n"
-                "enable_stage1_allgather_overlap, overlap stage1 V2 allgather with next step forward computation. There are some constraints for the overlap, such as the logging_step should be bigger than 1 for allgather overlap forward compute and no other sync could be called during the training for allgather overlap."
+                "enable_stage1_allgather_overlap, overlap stage1 V2 allgather with next step forward computation. There are some constraints for the overlap, such as the logging_step should be bigger than 1 for allgather overlap forward compute and no other sync could be called during the training for allgather overlap.\n"
+                "enable_stage1_tensor_fusion_blanced_save_load, convert unbalanced optimizer state to balanced state when using tensor fusion strategy, which may increase the memory occupation."
             )
         },
     )
@@ -1648,6 +1649,7 @@ class TrainingArguments:
                             "enable_stage1_overlap",
                             "enable_stage2_overlap",
                             "enable_release_grads",
+                            "enable_stage1_tensor_fusion_blanced_save_load",
                         ]:
                             raise ValueError(
                                 f"Found unknown pipeline mode config {x}, " f"accpet config is reduce_overlap."
@@ -1661,6 +1663,10 @@ class TrainingArguments:
 
                     if "enable_stage1_tensor_fusion" in sharding_parallel_config:
                         sharding.grad_bucket_size_numel = 210355872
+                        sharding.enable_stage1_tensor_fusion = True
+
+                    if "enable_stage1_tensor_fusion_blanced_save_load" in sharding_parallel_config:
+                        sharding.save_unbalanced_param = False
 
                     if "enable_release_grads" in sharding_parallel_config:
                         sharding.release_gradients = True
