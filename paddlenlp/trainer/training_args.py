@@ -1681,15 +1681,6 @@ class TrainingArguments:
                 amp.custom_black_list = self.amp_custom_black_list if self.amp_custom_black_list is not None else []
                 amp.custom_white_list = self.amp_custom_white_list if self.amp_custom_white_list is not None else []
 
-            if self.recompute:
-                recompute = strategy.recompute
-                recompute.enable = True
-                recompute.sr = self.sr if self.sr is not None else 0
-                recompute.refined_ops_patterns = []
-                if self.refined_ops_patterns is not None:
-                    for pattern in self.refined_ops_patterns:
-                        recompute.refined_ops_patterns.append(eval(pattern))
-
             self.strategy = strategy
             if self.hybrid_parallel_topo_order == "pp_first":
                 order = ["pp", "dp", "mp"]
@@ -2215,7 +2206,7 @@ class TrainingArguments:
         """
         Serializes this instance to a JSON string.
         """
-        return json.dumps(self.to_dict(), indent=2)
+        return json.dumps(str(self.to_dict()), indent=2)
 
     def to_sanitized_dict(self) -> Dict[str, Any]:
         """
