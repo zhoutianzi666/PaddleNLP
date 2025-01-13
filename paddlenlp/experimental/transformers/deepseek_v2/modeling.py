@@ -16,7 +16,9 @@ from __future__ import annotations
 from functools import partial
 
 import numpy as np
+import math
 import paddle
+from typing import Tuple
 from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn.quant import weight_quantize
@@ -35,7 +37,12 @@ from paddlenlp.experimental.transformers.utils import infererence_model_from_pre
 from paddlenlp.transformers import DeepseekV2Config, DeepseekV2PretrainedModel
 
 # from paddlenlp.transformers.conversion_utils import split_param_func
-from paddlenlp.transformers.deepseek_v2.modeling import DeepSeekV2LMHead
+from paddlenlp.transformers.deepseek_v2.modeling import (
+    DeepSeekV2LMHead,
+    yarn_find_correction_range,
+    yarn_get_mscale,
+    yarn_linear_ramp_mask,
+)
 from paddlenlp.transformers.model_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
 )
@@ -46,6 +53,112 @@ from paddlenlp.transformers.model_utils import (
 from paddlenlp.utils.log import logger
 
 __all__ = ["DeepseekV2ForCausalLMBlockInferenceModel"]
+
+
+class DeepseekScalingRotaryEmbedding(nn.Layer):
+    """RotaryEmbedding extended with YaRN method.
+
+    Credits to Peng et al. github.com/jquesnelle/yarn
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        scaling_factor: float,
+        *,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+        mscale: float = 1,
+        mscale_all_dim: float = 0,
+    ) -> None:
+        super().__init__()
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+
+        self.scaling_factor = scaling_factor
+        self.extrapolation_factor = extrapolation_factor
+        self.attn_factor = attn_factor
+        self.beta_fast = beta_fast
+        self.beta_slow = beta_slow
+        # Get n-d magnitude scaling corrected for interpolation.
+        self.mscale = float(
+            yarn_get_mscale(self.scaling_factor, float(mscale)) /
+            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
+            attn_factor)
+
+        cache = self._compute_cos_sin_cache()
+
+        self.cos_sin_cache: paddle.Tensor
+        self.register_buffer("cos_sin_cache", cache, persistable=False)
+
+    def _compute_inv_freq(self, scaling_factor: float) -> paddle.Tensor:
+        pos_freqs = self.base**(paddle.arange(
+            0, self.rotary_dim, 2, dtype=paddle.float32) / self.rotary_dim)
+
+        inv_freq_extrapolation = 1.0 / pos_freqs
+        inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
+
+        low, high = yarn_find_correction_range(self.beta_fast, self.beta_slow,
+                                                self.rotary_dim, self.base,
+                                                self.max_position_embeddings)
+        # Get n-d rotational scaling corrected for extrapolation
+        inv_freq_mask = (1 - yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2)) * self.extrapolation_factor
+        inv_freq = inv_freq_interpolation * (
+            1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -> paddle.Tensor:
+        inv_freq = self._compute_inv_freq(self.scaling_factor)
+        t = paddle.arange(self.max_position_embeddings * self.scaling_factor, dtype=paddle.float32)
+        freqs = paddle.einsum("i,j -> ij", t, inv_freq)
+        cos = (freqs.cos() * self.mscale)
+        sin = (freqs.sin() * self.mscale)
+        cache = paddle.concat((cos, sin), axis=-1)
+        return cache
+
+    def forward(
+        self,
+        position_ids: paddle.Tensor,
+        query: paddle.Tensor,
+        key: paddle.Tensor,
+    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+        query_rot = query[..., :self.rotary_dim]
+        key_rot = key[..., :self.rotary_dim]
+        if self.rotary_dim < self.head_size:
+            query_pass = query[..., self.rotary_dim:]
+            key_pass = key[..., self.rotary_dim:]
+
+        cos_sin = self.cos_sin_cache[position_ids]
+        cos, sin = cos_sin.chunk(2, axis=-1)
+
+        cos = cos.repeat_interleave(2, axis=-1).unsqueeze(-2)
+        sin = sin.repeat_interleave(2, axis=-1).unsqueeze(-2)
+
+        def _rotate_gptj(x: paddle.Tensor) -> paddle.Tensor:
+            x1 = x[..., ::2]
+            x2 = x[..., 1::2]
+            x = paddle.stack((-x2, x1), axis=-1)
+            return x.flatten(-2)
+        rotate_fn = _rotate_gptj
+
+        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
+        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+
+        if self.rotary_dim < self.head_size:
+            query = paddle.concat((query_rot, query_pass), axis=-1)
+            key = paddle.concat((key_rot, key_pass), axis=-1)
+        else:
+            query = query_rot
+            key = key_rot
+        return query, key
 
 
 class DeepseekV2RMSNorm(nn.Layer):
@@ -115,6 +228,19 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 self.vocab_size,
                 self.hidden_size,
             )
+
+        self.norm = DeepseekV2RMSNorm(config)
+ 
+        scaling_factor = config.rope_scaling["factor"]
+        original_max_position = config.rope_scaling["original_max_position_embeddings"]
+        extra_kwargs = {
+            k: v
+            for k, v in config.rope_scaling.items()
+            if k in ("extrapolation_factor", "attn_factor", "beta_fast",
+                        "beta_slow", "mscale", "mscale_all_dim")
+        }
+        self.rotary_emb = DeepseekScalingRotaryEmbedding(
+            config.qk_rope_head_dim, config.qk_rope_head_dim, original_max_position, config.rope_theta, scaling_factor, **extra_kwargs)
 
         # get ring_id
         ring_id = -1
@@ -308,6 +434,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             ffn2_weight_scale_attrs=ffn2_weight_scale_attrs,
             epsilon=self.rms_norm_eps,
             rope_theta=self.rope_theta,
+            rotary_emb=self.rotary_emb,
             norm_type="rmsnorm",
             use_neox_rotary_style=self.use_neox,
             rank_id=config.tensor_parallel_rank,
@@ -318,7 +445,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         self.set_transformer_block(transformer_config)
 
-        self.norm = DeepseekV2RMSNorm(config)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -703,7 +829,8 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
                 max_block_nums,
                 config.num_key_value_heads // max(config.tensor_parallel_degree, 1),
                 config.block_size,
-                config.hidden_size // config.num_attention_heads,
+                # config.hidden_size // config.num_attention_heads,
+                config.qk_nope_head_dim + config.qk_rope_head_dim
             ]
             cache_kvs.append(cache_kv_shape)
             cache_kvs.append(cache_kv_shape)

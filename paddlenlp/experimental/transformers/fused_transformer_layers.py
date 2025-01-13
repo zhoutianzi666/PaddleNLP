@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -174,6 +175,10 @@ class MLAConfig:
     def use_mla(self) -> bool:
         return self.kv_lora_rank is not None
 
+    @property
+    def qk_head_dim(self) -> int:
+        return self.qk_nope_head_dim + self.qk_rope_head_dim
+
 
 class FusedMultiTransformerConfig:
     def __init__(
@@ -187,6 +192,7 @@ class FusedMultiTransformerConfig:
         norm_type="layernorm",
         use_neox_rotary_style=False,
         rope_theta=10000.0,
+        rotary_emb=None,
         normalize_before=True,
         ln_scale_attrs=None,
         ln_bias_attrs=None,
@@ -253,6 +259,9 @@ class FusedMultiTransformerConfig:
         self.activation = activation
         self.norm_type = norm_type
         self.rope_theta = rope_theta
+
+        self.rotary_emb = rotary_emb
+
         self.use_neox_rotary_style = use_neox_rotary_style
         self.normalize_before = normalize_before
         self.ln_scale_attrs = ln_scale_attrs
@@ -630,10 +639,6 @@ class FusedMultiTransformerBase(Layer):
 
         self.dropout_rate = config.dropout_rate
 
-        from paddle.incubate.nn.functional import fused_linear
-
-        self.linear = fused_linear
-
     def init_weight(self):
         self.qkv_weights = []
         self.linear_weights = []
@@ -662,8 +667,7 @@ class FusedMultiTransformerBase(Layer):
                     q_proj_weight = self.create_parameter(
                         shape=[
                             self.config.embed_dim,
-                            self.num_heads
-                            * (self.config.mla_config.qk_nope_head_dim + self.config.mla_config.qk_rope_head_dim),
+                            self.num_heads * (self.config.mla_config.qk_head_dim),
                         ],
                         attr=q_proj_weight_attr,
                         dtype=self._dtype,
@@ -688,8 +692,7 @@ class FusedMultiTransformerBase(Layer):
                     q_b_proj_weight = self.create_parameter(
                         shape=[
                             self.config.mla_config.q_lora_rank,
-                            self.num_heads
-                            * (self.config.mla_config.qk_nope_head_dim + self.config.mla_config.qk_rope_head_dim),
+                            self.num_heads * (self.config.mla_config.qk_head_dim),
                         ],
                         attr=q_b_proj_weight_attr,
                         dtype=self._dtype,
@@ -900,14 +903,71 @@ class FusedMultiTransformerBase(Layer):
         return ln_out
 
     def compute_qkv_linear(self, ln_out, i):
-        if paddle.version.cuda() == "False" or float(paddle.version.cuda()) < 11.6:
+        if self.config.mla_config.use_mla():
+            if self.config.mla_config.q_lora_rank is not None:
+                query = paddle.matmul(ln_out, self.q_a_proj_weights[i])
+                query = self.norm_func(
+                    x=query,
+                    norm_weight=self.q_a_layernorm_weights[i],
+                    norm_bias=None,
+                    epsilon=self._epsilon,
+                    begin_norm_axis=1,
+                )[0]
+                query = paddle.matmul(query, self.q_b_proj_weights[i])
+            else:
+                query = paddle.matmul(ln_out, self.q_proj_weights[i])
+
+            query = query.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
+            query_nope, query_pe = paddle.split(
+                query, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.qk_rope_head_dim], axis=-1
+            )
+
+            compressed_kv = paddle.matmul(ln_out, self.kv_a_proj_with_mqa_weights[i])
+            compressed_kv, key_pe = paddle.split(
+                compressed_kv, [self.config.mla_config.kv_lora_rank, self.config.mla_config.qk_rope_head_dim], axis=-1
+            )
+            key_pe = key_pe.reshape([-1, 1, self.config.mla_config.qk_rope_head_dim])
+            compressed_kv = self.norm_func(
+                x=compressed_kv,
+                norm_weight=self.kv_a_layernorm_weights[i],
+                norm_bias=None,
+                epsilon=self._epsilon,
+                begin_norm_axis=1,
+            )[0]
+            key_value = paddle.matmul(compressed_kv, self.kv_b_proj_weights[i])
+            key_value = key_value.reshape(
+                [-1, self.num_heads, self.config.mla_config.qk_nope_head_dim + self.config.mla_config.v_head_dim]
+            )
+            key_nope, value = paddle.split(
+                key_value, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
+            )
+
+            position_ids = paddle.arange(ln_out.shape[0]).reshape((1, -1))
+            query_pe, key_pe = self.config.rotary_emb(position_ids, query_pe, key_pe)
+
+            query[..., self.config.mla_config.qk_nope_head_dim :] = query_pe
+            key = paddle.empty_like(query)
+            key[..., : self.config.mla_config.qk_nope_head_dim] = key_nope
+            key[..., self.config.mla_config.qk_nope_head_dim :] = key_pe
+
+            # query = paddle.nn.functional.pad(query, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
+            # key = paddle.nn.functional.pad(key, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
+            value = paddle.nn.functional.pad(value, [0, self.config.mla_config.qk_head_dim - self.config.mla_config.v_head_dim], value=0)
+
+            qkv_out = paddle.concat(
+                [
+                    query.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
+                    key.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
+                    value.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
+                ],
+                axis=-1,
+            )
+        else:
             qkv_out = paddle.matmul(ln_out, self.qkv_weights[i], False, True)
             if self.qkv_biases[i] is not None:
                 qkv_out = paddle.add(qkv_out, self.qkv_biases[i])
-            return qkv_out
-        else:
-            # This method requires CUDA version >= 11.6.
-            return self.linear(ln_out, self.qkv_weights[i], self.qkv_biases[i], transpose_weight=True)
+
+        return qkv_out
 
     def compute_qkv(self, src, residual_input, i):
         ln_out = self.compute_layernorm_before_qkv(src, i)
@@ -1213,7 +1273,6 @@ class FusedMultiTransformerBase(Layer):
 
         residual_input = src
         for i in range(self.num_layers):
-            breakpoint()
             qkv_out, residual_input = self.compute_qkv(src, residual_input, i)
             out_linear_out = self.compute_attn(
                 time_step,
@@ -1487,13 +1546,16 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
                 self.shared_expert_ffn2_weight_shape[0] //= 2
 
     def compute_qkv_linear(self, ln_out, i):
-        return weight_only_linear(
-            ln_out,
-            weight=self.qkv_weights[i],
-            bias=self.qkv_biases[i],
-            weight_scale=self.qkv_weights_scale[i],
-            weight_dtype=self.weight_dtype,
-        )
+        if self.config.mla_config.use_mla():
+            breakpoint()
+        else:
+            return weight_only_linear(
+                ln_out,
+                weight=self.qkv_weights[i],
+                bias=self.qkv_biases[i],
+                weight_scale=self.qkv_weights_scale[i],
+                weight_dtype=self.weight_dtype,
+            )
 
     def compute_out_linear(self, fmha_out, i):
         return weight_only_linear(
@@ -2076,11 +2138,14 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
         return ln_out
 
     def compute_qkv_linear(self, ln_out, i):
-        if paddle.is_compiled_with_rocm():
-            qkv_out = paddle.matmul(ln_out, self.qkv_weights[i])
+        if self.config.mla_config.use_mla():
+            breakpoint()
         else:
-            qkv_out = paddle.matmul(ln_out, self.qkv_weights[i], False, True)
-        return qkv_out
+            if paddle.is_compiled_with_rocm():
+                qkv_out = paddle.matmul(ln_out, self.qkv_weights[i])
+            else:
+                qkv_out = paddle.matmul(ln_out, self.qkv_weights[i], False, True)
+            return qkv_out
 
     def compute_fmha(
         self,
@@ -2306,7 +2371,7 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
     ):
         if self.config.append_attn:
             from paddlenlp_ops import append_attention
-
+            breakpoint()
             fmha_out = append_attention(
                 qkv_out,
                 caches[2 * i],
@@ -2434,7 +2499,7 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                     quant_min_bound=self.config.quant_min_bound,
                     rope_theta=self.config.rope_theta,
                 )[0]
-
+        breakpoint()
         out_linear_out = self.compute_out_linear(fmha_out, i)
 
         return out_linear_out
@@ -2767,25 +2832,25 @@ class FusedBlockMultiTransformerFP8(FusedBlockMultiTransformer):
         return ln_out
 
     def compute_qkv_linear(self, ln_out, i):
-        """
-        For fake parameter
-        """
-        if paddle.is_compiled_with_rocm() or float(paddle.version.cuda()) < 11.6:
-            qkv_out = paddle.matmul(ln_out, self.qkv_weights[i], False, True)
-            if self.qkv_biases[i] is not None:
-                qkv_out = paddle.add(qkv_out, self.qkv_biases[i])
-            return qkv_out
+        if self.config.mla_config.use_mla():
+            breakpoint()
         else:
-            qkv_out = fp8_gemm_fused(
-                ln_out,
-                self.qkv_weights[i],
-                transpose_x=False,
-                transpose_y=True,
-                bias=self.qkv_biases[i],
-                scale=self.weight_scales["qkv_weight_scale"][i] / (self.act_scales["qkv_in_scale"][i] * 448 * 448),
-                output_dtype=self._dtype,
-                act="identity",
-            )
+            if paddle.is_compiled_with_rocm() or float(paddle.version.cuda()) < 11.6:
+                qkv_out = paddle.matmul(ln_out, self.qkv_weights[i], False, True)
+                if self.qkv_biases[i] is not None:
+                    qkv_out = paddle.add(qkv_out, self.qkv_biases[i])
+                return qkv_out
+            else:
+                qkv_out = fp8_gemm_fused(
+                    ln_out,
+                    self.qkv_weights[i],
+                    transpose_x=False,
+                    transpose_y=True,
+                    bias=self.qkv_biases[i],
+                    scale=self.weight_scales["qkv_weight_scale"][i] / (self.act_scales["qkv_in_scale"][i] * 448 * 448),
+                    output_dtype=self._dtype,
+                    act="identity",
+                )
 
             return qkv_out
 
