@@ -736,8 +736,9 @@ __global__ void append_write_cache_kv_c8_qkv(
       batch_id * max_seq_len - cum_offsets[batch_id];
   const uint32_t kv_batch_stride = (num_heads + 2 * kv_num_heads) * HEAD_DIM;
   const uint32_t kv_h_stride = HEAD_DIM;
-  __shared__ T k_smem_ori[num_rows_per_block * HEAD_DIM];
-  __shared__ T v_smem_ori[num_rows_per_block * HEAD_DIM];
+  extern __shared__ uint8_t smem[];
+  T *k_smem_ori = (T*)smem; // [num_rows_per_block * HEAD_DIM];
+  T *v_smem_ori = (T*)(smem + num_rows_per_block * HEAD_DIM * sizeof(T)); // [num_rows_per_block * HEAD_DIM];
 
   smem_t k_smem(k_smem_ori);
   smem_t v_smem(v_smem_ori);
@@ -983,12 +984,13 @@ __global__ void append_write_cache_kv_c4_qkv(
       batch_id * max_seq_len - cum_offsets[batch_id];
   const uint32_t kv_batch_stride = (num_heads + 2 * kv_num_heads) * HEAD_DIM;
   const uint32_t kv_h_stride = HEAD_DIM;
-  __shared__ T k_smem_ori[num_rows_per_block * HEAD_DIM];
-  __shared__ T v_smem_ori[num_rows_per_block * HEAD_DIM];
-  __shared__ T k_scale_smem[HEAD_DIM];
-  __shared__ T v_scale_smem[HEAD_DIM];
-  __shared__ T k_zero_point_smem[HEAD_DIM];
-  __shared__ T v_zero_point_smem[HEAD_DIM];
+  extern __shared__ uint8_t smem[];
+  T *k_smem_ori = (T*)smem; // [num_rows_per_block * HEAD_DIM];
+  T *v_smem_ori = (T*)(smem + num_rows_per_block * HEAD_DIM * sizeof(T)); // [num_rows_per_block * HEAD_DIM];
+  T *k_scale_smem = (T*)(smem + num_rows_per_block * HEAD_DIM * 2 * sizeof(T)); // [HEAD_DIM];
+  T *v_scale_smem = (T*)(smem + (num_rows_per_block * HEAD_DIM * 2 + HEAD_DIM) * sizeof(T)); // [HEAD_DIM];
+  T *k_zero_point_smem = (T*)(smem + (num_rows_per_block * HEAD_DIM * 2 + HEAD_DIM * 2) * sizeof(T)); // [HEAD_DIM];
+  T *v_zero_point_smem = (T*)(smem + (num_rows_per_block * HEAD_DIM * 2 + HEAD_DIM * 3) * sizeof(T)); // [HEAD_DIM];
   const T *cache_k_scale_now = cache_k_scales + kv_head_idx * HEAD_DIM;
   const T *cache_k_zp_now = cache_k_zero_points + kv_head_idx * HEAD_DIM;
   const T *cache_v_scale_now = cache_v_scales + kv_head_idx * HEAD_DIM;
@@ -1511,7 +1513,6 @@ void CascadeAppendWriteCacheKVC8QKV(
   auto num_tokens = meta_data.token_nums;
   auto num_heads = meta_data.q_num_heads;
   auto kv_num_heads = meta_data.kv_num_heads;
-  auto head_dim = meta_data.head_dims;
 
   const uint32_t pad_len = BLOCK_SIZE;
 
@@ -1530,9 +1531,11 @@ void CascadeAppendWriteCacheKVC8QKV(
                                                 HEAD_DIM,
                                                 BLOCK_SIZE,
                                                 num_warps>;
-  cudaFuncSetAttribute(
-      kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-  kernel_fn<<<grids, blocks, 0, stream>>>(cache_k_out->data<uint8_t>(),
+  if (smem_size >= 48 * 1024) {
+    cudaFuncSetAttribute(
+        kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  }
+  kernel_fn<<<grids, blocks, smem_size, stream>>>(cache_k_out->data<uint8_t>(),
                                           cache_v_out->data<uint8_t>(),
                                           qkv.data<T>(),
                                           cache_k_scale.data<T>(),
@@ -1578,7 +1581,6 @@ void CascadeAppendWriteCacheKVC4QKV(
   auto num_tokens = meta_data.token_nums;
   auto num_heads = meta_data.q_num_heads;
   auto kv_num_heads = meta_data.kv_num_heads;
-  auto head_dim = meta_data.head_dims;
 
   const uint32_t pad_len = BLOCK_SIZE;
 
@@ -1598,9 +1600,11 @@ void CascadeAppendWriteCacheKVC4QKV(
                                                 HEAD_DIM,
                                                 BLOCK_SIZE,
                                                 num_warps>;
-  cudaFuncSetAttribute(
-      kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-  kernel_fn<<<grids, blocks, 0, stream>>>(cache_k_out->data<uint8_t>(),
+  if (smem_size >= 48 * 1024) {
+    cudaFuncSetAttribute(
+        kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  }
+  kernel_fn<<<grids, blocks, smem_size, stream>>>(cache_k_out->data<uint8_t>(),
                                           cache_v_out->data<uint8_t>(),
                                           qkv.data<T>(),
                                           cache_k_scale.data<T>(),
