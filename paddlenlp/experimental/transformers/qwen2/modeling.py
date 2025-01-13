@@ -306,7 +306,7 @@ class Qwen2InferenceModel(Qwen2PretrainedModel):
             embed_dim=self.hidden_size,
             num_heads=self.num_attention_heads,
             kv_num_heads=self.num_key_value_heads,
-            dim_feedforward=self.intermediate_size,
+            intermediate_size=self.intermediate_size,
             quant_type=self.quant_type,
             activation="swiglu",
             num_layers=config.num_hidden_layers,
