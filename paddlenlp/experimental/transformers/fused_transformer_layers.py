@@ -390,11 +390,12 @@ class FusedMultiTransformerBase(Layer):
         assert config.num_heads % config.nranks == 0
         assert config.intermediate_size % config.nranks == 0
         assert config.moe_config.shared_expert_intermediate_size % config.nranks == 0
+        assert config.moe_config.moe_intermediate_size % config.nranks == 0
         self.num_heads = config.num_heads // config.nranks
         self.kv_num_heads = config.kv_num_heads // config.nranks
         self.intermediate_size = config.intermediate_size // config.nranks
-        shared_expert_intermediate_size = config.moe_config.shared_expert_intermediate_size // config.nranks
-        self.config.moe_config.shared_expert_intermediate_size = shared_expert_intermediate_size
+        self.config.moe_config.shared_expert_intermediate_size //= config.nranks
+        self.config.moe_config.moe_intermediate_size //= config.nranks
 
         self.num_layers = config.num_layers
         assert self.num_layers > 0

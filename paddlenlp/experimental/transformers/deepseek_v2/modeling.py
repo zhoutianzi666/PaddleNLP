@@ -211,6 +211,11 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         self.first_k_dense_replace = config.first_k_dense_replace
         self.n_routed_experts = config.n_routed_experts
 
+        if config.tensor_parallel_degree > config.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {config.tensor_parallel_degree} is greater than "
+                f"the number of experts {config.n_routed_experts}.")
+
         if config.tensor_parallel_degree > 1 and config.vocab_size % config.tensor_parallel_degree == 0:
             self.embed_tokens = fleet.meta_parallel.VocabParallelEmbedding(
                 self.vocab_size,
@@ -825,27 +830,18 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
             }
 
             # Column Linear
-            if config.fuse_attention_qkv:
-                base_actions["layers.0.self_attn.qkv_proj.weight"] = partial(fn, is_column=True)
-            else:
-                base_actions["layers.0.self_attn.q_proj.weight"] = partial(fn, is_column=True)
-                base_actions["layers.0.self_attn.q_proj.bias"] = partial(fn, is_column=True)
-                # if we have enough num_key_value_heads to split, then split it.
-                if config.num_key_value_heads % config.tensor_parallel_degree == 0:
-                    base_actions["layers.0.self_attn.k_proj.weight"] = partial(fn, is_column=True)
-                    base_actions["layers.0.self_attn.v_proj.weight"] = partial(fn, is_column=True)
-                    base_actions["layers.0.self_attn.k_proj.bias"] = partial(fn, is_column=True)
-                    base_actions["layers.0.self_attn.v_proj.bias"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.q_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.q_b_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.kv_b_proj.weight"] = partial(fn, is_column=True)
 
-            if config.fuse_attention_ffn:
-                base_actions["layers.0.mlp.gate_up_fused_proj.weight"] = partial(
-                    fn, is_column=True, is_naive_2fuse=True
-                )
-            else:
-                for expert_idx in range(config.n_routed_experts):
-                    base_actions[f"layers.0.mlp.experts.{expert_idx}.up_proj.weight"] = partial(fn, is_column=True)
-                    base_actions[f"layers.0.mlp.experts.{expert_idx}.gate_proj.weight"] = partial(fn, is_column=True)
-                    base_actions[f"layers.0.mlp.experts.{expert_idx}.down_proj.weight"] = partial(fn, is_column=False)
+            base_actions["layers.0.mlp.gate_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.up_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.down_proj.weight"] = partial(fn, is_column=False)
+
+            for expert_idx in range(config.n_routed_experts):
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.up_proj.weight"] = partial(fn, is_column=True)
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.gate_proj.weight"] = partial(fn, is_column=True)
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.down_proj.weight"] = partial(fn, is_column=False)
             base_actions["layers.0.mlp.shared_experts.up_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.shared_experts.gate_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.shared_experts.down_proj.weight"] = partial(fn, is_column=False)

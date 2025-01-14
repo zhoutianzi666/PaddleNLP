@@ -1347,6 +1347,31 @@ class Qwen2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, Qwen2Pr
                 "layers.0.mlp.down_proj.weight": partial(fn, is_column=False),
             }
 
+            if "a8w8" in config.quant_type:
+                if config.quantization_config.shift_smooth_all_linears:
+                    base_actions["layers.0.self_attn.o_proj.shift_bias"] = partial(fn, is_column=True)
+                    base_actions["layers.0.self_attn.o_proj.smooth_weight"] = partial(fn, is_column=True)
+                    base_actions["layers.0.mlp.down_proj.shift_bias"] = partial(fn, is_column=True)
+                    base_actions["layers.0.mlp.down_proj.smooth_weight"] = partial(fn, is_column=True)
+
+                if config.quantization_config.shift:
+                    if config.fuse_attention_qkv:
+                        base_actions["layers.0.self_attn.qkv_proj.bias"] = partial(fn, is_column=True)
+                    else:
+                        base_actions["layers.0.self_attn.q_proj.bias"] = partial(fn, is_column=True)
+                        # if we have enough num_key_value_heads to split, then split it.
+                        if config.num_key_value_heads % config.tensor_parallel_degree == 0:
+                            base_actions["layers.0.self_attn.k_proj.bias"] = partial(fn, is_column=True)
+                            base_actions["layers.0.self_attn.v_proj.bias"] = partial(fn, is_column=True)
+
+                    if config.fuse_attention_ffn:
+                        base_actions["layers.0.mlp.gate_up_fused_proj.bias"] = partial(
+                            fn, is_column=True, is_naive_2fuse=True
+                        )
+                    else:
+                        base_actions["layers.0.mlp.gate_proj.bias"] = partial(fn, is_column=True)
+                        base_actions["layers.0.mlp.up_proj.bias"] = partial(fn, is_column=True)
+
             # Column Linear
             if config.fuse_attention_qkv:
                 base_actions["layers.0.self_attn.qkv_proj.weight"] = partial(fn, is_column=True)
