@@ -358,6 +358,12 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             for idx in range(self.num_layers)
         ]
 
+        q_proj_weight_scale_attrs = None
+        q_a_proj_weight_scale_attrs = None
+        q_b_proj_weight_scale_attrs = None
+        kv_a_proj_with_mqa_weight_scale_attrs = None
+        kv_b_proj_weight_scale_attrs = None
+
         out_proj_weight_scale_attrs = None
         ffn1_weight_scale_attrs = None
         ffn2_weight_scale_attrs = None
@@ -365,6 +371,40 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         shared_expert_ffn2_weight_scale_attrs = None
 
         if self.use_weight_only:
+            if self.config.q_lora_rank is not None:
+                q_proj_weight_scale_attrs = [
+                    paddle.ParamAttr(
+                        name=f"fuse{self.base_model_prefix}.{idx}.q_a_proj_weight_scale",
+                    )
+                    for idx in range(self.num_layers)
+                ]
+                q_b_proj_weight_scale_attrs = [
+                    paddle.ParamAttr(
+                        name=f"fuse{self.base_model_prefix}.{idx}.q_b_proj_weight_scale",
+                    )
+                    for idx in range(self.num_layers)
+                ]
+            else:
+                q_proj_weight_scale_attrs = [
+                    paddle.ParamAttr(
+                        name=f"fuse{self.base_model_prefix}.{idx}.q_proj_weight_scale",
+                    )
+                    for idx in range(self.num_layers)
+                ]
+
+            kv_a_proj_with_mqa_weight_scale_attrs = [
+                paddle.ParamAttr(
+                    name=f"fuse{self.base_model_prefix}.{idx}.kv_a_proj_with_mqa_weight_scale",
+                )
+                for idx in range(self.num_layers)
+            ]
+            kv_b_proj_weight_scale_attrs = [
+                paddle.ParamAttr(
+                    name=f"fuse{self.base_model_prefix}.{idx}.kv_b_proj_weight_scale",
+                )
+                for idx in range(self.num_layers)
+            ]
+
             out_proj_weight_scale_attrs = [
                 paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.out_proj_weight_scale")
                 for idx in range(self.num_layers)
@@ -394,12 +434,17 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             v_head_dim=self.config.v_head_dim,
             mscale=yarn_get_mscale(scaling_factor, float(config.rope_scaling.get("mscale_all_dim", 1.0))),
             q_proj_weight_attrs=q_proj_weight_attrs,
+            q_proj_weight_scale_attrs=q_proj_weight_scale_attrs,
             q_a_proj_weight_attrs=q_a_proj_weight_attrs,
+            q_a_proj_weight_scale_attrs=q_a_proj_weight_scale_attrs,
             q_a_layernorm_weight_attrs=q_a_layernorm_weight_attrs,
             q_b_proj_weight_attrs=q_b_proj_weight_attrs,
+            q_b_proj_weight_scale_attrs=q_b_proj_weight_scale_attrs,
             kv_a_proj_with_mqa_weight_attrs=kv_a_proj_with_mqa_weight_attrs,
+            kv_a_proj_with_mqa_weight_scale_attrs=kv_a_proj_with_mqa_weight_scale_attrs,
             kv_a_layernorm_weight_attrs=kv_a_layernorm_weight_attrs,
             kv_b_proj_weight_attrs=kv_b_proj_weight_attrs,
+            kv_b_proj_weight_scale_attrs=kv_b_proj_weight_scale_attrs,
         )
 
         moe_config = MoeConfig(
@@ -484,35 +529,67 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 q_a_proj_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_proj.weight"]
                 ).cast(dtype)
-                self.transformer_block.q_a_proj_weights[idx].set_value(q_a_proj_weight)
                 q_a_layernorm_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_layernorm.weight"]
                 ).cast(dtype)
-                self.transformer_block.q_a_layernorm_weights[idx].set_value(q_a_layernorm_weight)
                 q_b_proj_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight"]
                 ).cast(dtype)
-                self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_weight)
+
+                if self.use_weight_only:
+                    q_a_proj_quanted_weight, q_a_proj_weight_scale = weight_quantize(
+                        q_a_proj_weight, algo=self.quant_algo
+                    )
+                    self.transformer_block.q_a_proj_weights[idx].set_value(q_a_proj_quanted_weight)
+                    self.transformer_block.q_a_proj_weights_scale[idx].set_value(q_a_proj_weight_scale)
+
+                    q_b_proj_quanted_weight, q_b_proj_weight_scale = weight_quantize(
+                        q_b_proj_weight, algo=self.quant_algo
+                    )
+                    self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_quanted_weight)
+                    self.transformer_block.q_b_proj_weights_scale[idx].set_value(q_b_proj_weight_scale)
+                else:
+                    self.transformer_block.q_a_proj_weights[idx].set_value(q_a_proj_weight)
+                    self.transformer_block.q_a_layernorm_weights[idx].set_value(q_a_layernorm_weight)
+                    self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_weight)
             else:
                 q_proj_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_proj.weight"]
                 ).cast(dtype)
-                self.transformer_block.q_proj_weights[idx].set_value(q_proj_weight)
+
+                if self.use_weight_only:
+                    q_proj_quanted_weight, q_proj_weight_scale = weight_quantize(q_proj_weight, algo=self.quant_algo)
+                    self.transformer_block.q_proj_weights[idx].set_value(q_proj_quanted_weight)
+                    self.transformer_block.q_proj_weights_scale[idx].set_value(q_proj_weight_scale)
+                else:
+                    self.transformer_block.q_proj_weights[idx].set_value(q_proj_weight)
 
             kv_a_proj_with_mqa_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_proj_with_mqa.weight"]
             ).cast(dtype)
-            self.transformer_block.kv_a_proj_with_mqa_weights[idx].set_value(kv_a_proj_with_mqa_weight)
-
             kv_a_layernorm_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_layernorm.weight"]
             ).cast(dtype)
-            self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
-
             kv_b_proj_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"]
             ).cast(dtype)
-            self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_weight)
+
+            if self.use_weight_only:
+                kv_a_proj_with_mqa_quanted_weight, kv_a_proj_with_mqa_weight_scale = weight_quantize(
+                    kv_a_proj_with_mqa_weight, algo=self.quant_algo
+                )
+                self.transformer_block.kv_a_proj_with_mqa_weights[idx].set_value(kv_a_proj_with_mqa_quanted_weight)
+                self.transformer_block.kv_a_proj_with_mqa_weights_scale[idx].set_value(kv_a_proj_with_mqa_weight_scale)
+
+                kv_b_proj_quanted_weight, kv_b_proj_weight_scale = weight_quantize(
+                    kv_b_proj_weight, algo=self.quant_algo
+                )
+                self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_quanted_weight)
+                self.transformer_block.kv_b_proj_weights_scale[idx].set_value(kv_b_proj_weight_scale)
+            else:
+                self.transformer_block.kv_a_proj_with_mqa_weights[idx].set_value(kv_a_proj_with_mqa_weight)
+                self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
+                self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_weight)
 
             linear_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight"]
