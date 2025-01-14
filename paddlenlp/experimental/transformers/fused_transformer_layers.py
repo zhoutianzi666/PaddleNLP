@@ -162,6 +162,8 @@ class MLAConfig:
     qk_rope_head_dim: int = None
     v_head_dim: int = None
 
+    mscale: float = 1.0
+
     q_proj_weight_attrs: Optional[List[paddle.ParamAttr]] = None
 
     q_a_proj_weight_attrs: Optional[List[paddle.ParamAttr]] = None
@@ -393,6 +395,11 @@ class FusedMultiTransformerBase(Layer):
         assert self.num_layers > 0
         if config.qkv_weight_attrs is not None and isinstance(config.qkv_weight_attrs, (list, tuple)):
             assert self.num_layers == len(config.qkv_weight_attrs)
+
+        self.softmax_scale = float(self.head_dim**-0.5)
+        if self.config.mla_config.use_mla():
+            mscale = self.config.mla_config.mscale
+            self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.weight_dtype = self._dtype
         self.create_params_type = self.get_weight_create_dype()
@@ -1032,7 +1039,7 @@ class FusedMultiTransformerBase(Layer):
             seq_lens,
             seq_lens + pre_caches_length,
             mask=attn_mask,
-            scale=float(self.head_dim**-0.5),
+            scale=self.softmax_scale,
         )
 
         return transpose_remove_padding(qktv_out, seq_lens, padding_offset)
@@ -2203,7 +2210,7 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
             seq_lens,
             seq_lens + pre_caches_length,
             mask=attn_mask,
-            scale=float(self.head_dim**-0.5),
+            scale=self.softmax_scale,
         )
 
         fmha_out = transpose_remove_padding(qktv_out, seq_lens, padding_offset)
@@ -2411,8 +2418,9 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                 "none",  # cache_quant_type
                 self.use_neox_rotary_style,
                 kwargs.get("max_input_length", -1),
-                0.0,
-                0.0,
+                self.softmax_scale,  # softmax_scale
+                0.0,  # quant_max_bound
+                0.0,  # quant_min_bound
                 0.0,  # out_linear_in_scale
                 self.config.speculate_config.speculate_max_draft_token_num,
                 True,  # causal
@@ -2610,6 +2618,7 @@ class FusedBlockMultiTransformerA8W8(FusedBlockMultiTransformer, FusedMultiTrans
                 cache_quant_type_str,
                 self.use_neox_rotary_style,
                 kwargs.get("max_input_length", -1),
+                self.softmax_scale,
                 self.quant_max_bound,
                 self.quant_min_bound,
                 self.act_scales["out_linear_in_scale"][i],
@@ -2969,6 +2978,7 @@ class FusedBlockMultiTransformerFP8(FusedBlockMultiTransformer):
                 cache_quant_type_str,
                 self.use_neox_rotary_style,
                 kwargs.get("max_input_length", -1),
+                self.softmax_scale,
                 self.quant_max_bound,
                 self.quant_min_bound,
                 self.act_scales["out_linear_in_scale"][i],

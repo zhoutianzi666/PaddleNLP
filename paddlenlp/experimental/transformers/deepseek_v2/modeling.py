@@ -34,8 +34,6 @@ from paddlenlp.experimental.transformers.generation_utils import (
 )
 from paddlenlp.experimental.transformers.utils import infererence_model_from_pretrained
 from paddlenlp.transformers import DeepseekV2Config, DeepseekV2PretrainedModel
-
-# from paddlenlp.transformers.conversion_utils import split_param_func
 from paddlenlp.transformers.deepseek_v2.modeling import (
     DeepSeekV2LMHead,
     yarn_find_correction_range,
@@ -227,8 +225,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         self.norm = DeepseekV2RMSNorm(config)
 
-        scaling_factor = config.rope_scaling["factor"]
-        original_max_position = config.rope_scaling["original_max_position_embeddings"]
+        scaling_factor = config.rope_scaling.get("factor", 1)
+        original_max_position = config.rope_scaling.get("original_max_position_embeddings", 4096)
         extra_kwargs = {
             k: v
             for k, v in config.rope_scaling.items()
@@ -394,6 +392,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             qk_nope_head_dim=self.config.qk_nope_head_dim,
             qk_rope_head_dim=self.config.qk_rope_head_dim,
             v_head_dim=self.config.v_head_dim,
+            mscale=yarn_get_mscale(scaling_factor, float(config.rope_scaling.get("mscale_all_dim", 1.0))),
             q_proj_weight_attrs=q_proj_weight_attrs,
             q_a_proj_weight_attrs=q_a_proj_weight_attrs,
             q_a_layernorm_weight_attrs=q_a_layernorm_weight_attrs,
@@ -683,15 +682,10 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         draft_tokens = kwargs.get("draft_tokens", None)
         seq_lens_encoder = kwargs.get("seq_lens_encoder", None)
 
-        # whether speculative decoding or not
-        if draft_tokens is None:
-            ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k = self.remove_padding(
-                input_ids, seq_lens_this_time
-            )
-        else:
-            ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k = self.remove_padding(
-                input_ids, seq_lens_this_time, draft_tokens, seq_lens_encoder
-            )
+        ids_remove_padding, padding_offset, cum_offsets, cu_seqlens_q, cu_seqlens_k = self.remove_padding(
+            input_ids, seq_lens_this_time, draft_tokens, seq_lens_encoder
+        )
+
         kwargs["cu_seqlens_q"] = cu_seqlens_q
         kwargs["cu_seqlens_k"] = cu_seqlens_k
         kwargs["padding_offsets"] = padding_offset

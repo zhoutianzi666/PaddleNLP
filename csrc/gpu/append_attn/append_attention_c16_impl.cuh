@@ -31,7 +31,7 @@ template <typename T,
           typename OutT = T,
           bool ENABLE_PREFILL = true>
 __global__ void multi_query_append_attention_kernel(
-    T *__restrict__ q,        // [token_num, (num_heads + 2* kv_num_head) * head_dim]
+    T *__restrict__ q,  // [token_num, (num_heads + 2* kv_num_head) * head_dim]
     T *__restrict__ cache_k,  // [max_block_num, num_heads, block_size,
                               // head_dim]
     T *__restrict__ cache_v,
@@ -46,7 +46,7 @@ __global__ void multi_query_append_attention_kernel(
     const int max_seq_len,
     const int max_dec_len,
     const int max_block_num_per_seq,
-    const float scale,
+    const float softmax_scale,
     const float quant_max_bound,
     const float quant_min_bound,
     const float in_scale,
@@ -158,7 +158,7 @@ __global__ void multi_query_append_attention_kernel(
   __syncthreads();
 
   q_smem_inplace_multiply_sm_scale<num_frags_x, num_frags_y, T>(&qo_smem,
-                                                                scale);
+                                                                softmax_scale);
 
   smem_t k_smem(smem + NUM_WARPS * num_frags_x * 16 * HEAD_DIM * sizeof(T)),
       v_smem(smem + (NUM_WARPS * num_frags_x + num_frags_z) * 16 * HEAD_DIM *
@@ -395,7 +395,7 @@ template <typename T,
           typename OutT = T,
           bool ENABLE_PREFILL = true>
 __global__ void multi_query_append_attention_warp1_4_kernel(
-    T *__restrict__ q,        // [token_num, (num_heads + 2* kv_num_head) * head_dim]
+    T *__restrict__ q,  // [token_num, (num_heads + 2* kv_num_head) * head_dim]
     T *__restrict__ cache_k,  // [max_block_num, num_heads, block_size,
                               // head_dim]
     T *__restrict__ cache_v,
@@ -410,7 +410,7 @@ __global__ void multi_query_append_attention_warp1_4_kernel(
     const int max_seq_len,
     const int max_dec_len,
     const int max_block_num_per_seq,
-    const float scale,
+    const float softmax_scale,
     const float quant_max_bound,
     const float quant_min_bound,
     const float in_scale,
@@ -524,7 +524,7 @@ __global__ void multi_query_append_attention_warp1_4_kernel(
   __syncthreads();
 
   q_smem_inplace_multiply_sm_scale_multi_warps<num_frags_x, num_frags_y, T>(
-      &qo_smem, scale);
+      &qo_smem, softmax_scale);
 
   smem_t k_smem(smem + num_frags_x * 16 * HEAD_DIM * sizeof(T)),
       v_smem(smem + (num_frags_x + NUM_WARP_KV * num_frags_z) * 16 * HEAD_DIM *
@@ -783,6 +783,7 @@ void MultiQueryAppendAttention(
     const int num_blocks_x_cpu,
     const int max_seq_len,
     const int max_dec_len,
+    const float softmax_scale,
     const float quant_max_bound,
     const float quant_min_bound,
     const float in_scale,
@@ -806,8 +807,6 @@ void MultiQueryAppendAttention(
   constexpr uint32_t num_qrow_per_block = NUM_WARP_Q * num_frags_x * 16;
 
   auto *allocator = paddle::GetAllocator(qkv.place());
-
-  const float scale = 1.f / sqrt(HEAD_DIM);
 
   if constexpr (NUM_WARP_Q == 4) {
     constexpr uint32_t num_frags_z = BLOCK_SIZE / 16;
@@ -885,7 +884,7 @@ void MultiQueryAppendAttention(
           max_seq_len,
           max_dec_len,
           max_block_num_per_seq,
-          scale,
+          softmax_scale,
           quant_max_bound,
           quant_min_bound,
           in_scale,
@@ -942,7 +941,7 @@ void MultiQueryAppendAttention(
           max_seq_len,
           max_dec_len,
           max_block_num_per_seq,
-          scale,
+          softmax_scale,
           quant_max_bound,
           quant_min_bound,
           in_scale,
@@ -1106,7 +1105,7 @@ void MultiQueryAppendAttention(
           max_seq_len,
           max_dec_len,
           max_block_num_per_seq,
-          scale,
+          softmax_scale,
           quant_max_bound,
           quant_min_bound,
           in_scale,
@@ -1174,7 +1173,7 @@ void MultiQueryAppendAttention(
           max_seq_len,
           max_dec_len,
           max_block_num_per_seq,
-          scale,
+          softmax_scale,
           quant_max_bound,
           quant_min_bound,
           in_scale,
@@ -1224,8 +1223,7 @@ void MultiQueryAppendAttention(
       } else {
         constexpr int blockx = HEAD_DIM / vec_size;
         constexpr int blocky = (128 + blockx - 1) / blockx;
-        dim3 grids_merge(min(sm_count * 4, token_num),
-                         num_heads);
+        dim3 grids_merge(min(sm_count * 4, token_num), num_heads);
         dim3 blocks_merge(blockx, blocky);
         merge_multi_chunks_v2_kernel<NV_TYPE,
                                      vec_size,
@@ -1265,37 +1263,39 @@ void MultiQueryAppendAttention(
 
 template <typename T, typename OutT>
 void CascadeAppendAttentionC16Kernel(
-    const AppendAttnMetaData& meta_data,
-    const paddle::Tensor& qkv,  // [token_num, (num_heads + 2* kv_num_head) * head_dim]
-    const paddle::Tensor&
-        cache_k,  // [max_block_num, num_heads, block_size, head_dim]
-    const paddle::Tensor&
-        cache_v,  // [max_block_num, num_heads, head_dim, block_size]
-    const paddle::optional<paddle::Tensor>& attn_mask,
-    const paddle::optional<paddle::Tensor>&
-        cache_k_scale,  // [num_kv_heads, head_dim]
-    const paddle::optional<paddle::Tensor>&
-        cache_v_scale,  // [num_kv_heads, head_dim]
-    const paddle::optional<paddle::Tensor>&
-        cache_k_zp,  // [num_kv_heads, head_dim]
-    const paddle::optional<paddle::Tensor>&
-        cache_v_zp,  // [num_kv_heads, head_dim]
-    const paddle::optional<paddle::Tensor>&
-        shift_bias,  // [num_kv_heads, head_dim]
-    const paddle::optional<paddle::Tensor>&
-        smooth_weight,  // [num_kv_heads, head_dim]
-    const paddle::Tensor& seq_lens_q,
-    const paddle::Tensor& seq_lens_kv,
-    const paddle::Tensor& seq_lens_encoder,
-    const paddle::Tensor& padding_offsets,
-    const paddle::Tensor& cum_offsets,
-    const paddle::Tensor& block_table,
-    const paddle::Tensor& batch_ids,
-    const paddle::Tensor& tile_ids_per_batch,
+    const AppendAttnMetaData &meta_data,
+    const paddle::Tensor
+        &qkv,  // [token_num, (num_heads + 2* kv_num_head) * head_dim]
+    const paddle::Tensor
+        &cache_k,  // [max_block_num, num_heads, block_size, head_dim]
+    const paddle::Tensor
+        &cache_v,  // [max_block_num, num_heads, head_dim, block_size]
+    const paddle::optional<paddle::Tensor> &attn_mask,
+    const paddle::optional<paddle::Tensor>
+        &cache_k_scale,  // [num_kv_heads, head_dim]
+    const paddle::optional<paddle::Tensor>
+        &cache_v_scale,  // [num_kv_heads, head_dim]
+    const paddle::optional<paddle::Tensor>
+        &cache_k_zp,  // [num_kv_heads, head_dim]
+    const paddle::optional<paddle::Tensor>
+        &cache_v_zp,  // [num_kv_heads, head_dim]
+    const paddle::optional<paddle::Tensor>
+        &shift_bias,  // [num_kv_heads, head_dim]
+    const paddle::optional<paddle::Tensor>
+        &smooth_weight,  // [num_kv_heads, head_dim]
+    const paddle::Tensor &seq_lens_q,
+    const paddle::Tensor &seq_lens_kv,
+    const paddle::Tensor &seq_lens_encoder,
+    const paddle::Tensor &padding_offsets,
+    const paddle::Tensor &cum_offsets,
+    const paddle::Tensor &block_table,
+    const paddle::Tensor &batch_ids,
+    const paddle::Tensor &tile_ids_per_batch,
     const int num_blocks,
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float softmax_scale,
     const float quant_max_bound,
     const float quant_min_bound,
     const float in_scale,
@@ -1303,8 +1303,8 @@ void CascadeAppendAttentionC16Kernel(
     const bool causal,
     const bool is_decoder,
     const bool enable_prefill,
-    cudaStream_t& stream,
-    paddle::Tensor* out) {
+    cudaStream_t &stream,
+    paddle::Tensor *out) {
   const auto token_num = meta_data.token_nums;
   const auto block_size = meta_data.block_size;
   const auto bsz = meta_data.batch_size;
@@ -1356,6 +1356,7 @@ void CascadeAppendAttentionC16Kernel(
                                 num_blocks,
                                 max_seq_len,
                                 max_dec_len,
+                                softmax_scale,
                                 quant_max_bound,
                                 quant_min_bound,
                                 in_scale,
