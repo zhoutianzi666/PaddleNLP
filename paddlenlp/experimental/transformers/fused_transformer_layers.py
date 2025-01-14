@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import os
-
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -952,7 +951,9 @@ class FusedMultiTransformerBase(Layer):
 
             # query = paddle.nn.functional.pad(query, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
             # key = paddle.nn.functional.pad(key, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
-            value = paddle.nn.functional.pad(value, [0, self.config.mla_config.qk_head_dim - self.config.mla_config.v_head_dim], value=0)
+            value = paddle.nn.functional.pad(
+                value, [0, self.config.mla_config.qk_head_dim - self.config.mla_config.v_head_dim], value=0
+            )
 
             qkv_out = paddle.concat(
                 [
@@ -2371,7 +2372,7 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
     ):
         if self.config.append_attn:
             from paddlenlp_ops import append_attention
-            breakpoint()
+
             fmha_out = append_attention(
                 qkv_out,
                 caches[2 * i],
@@ -2499,7 +2500,12 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                     quant_min_bound=self.config.quant_min_bound,
                     rope_theta=self.config.rope_theta,
                 )[0]
-        breakpoint()
+
+        if self.config.mla_config.use_mla():
+            fmha_out = fmha_out.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
+            fmha_out = fmha_out[:, :, : self.config.mla_config.v_head_dim]
+            fmha_out = fmha_out.reshape([-1, self.num_heads * self.config.mla_config.v_head_dim])
+
         out_linear_out = self.compute_out_linear(fmha_out, i)
 
         return out_linear_out
