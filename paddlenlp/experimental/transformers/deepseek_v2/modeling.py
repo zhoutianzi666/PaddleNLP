@@ -14,11 +14,10 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Tuple
 
 import numpy as np
-import math
 import paddle
-from typing import Tuple
 from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn.quant import weight_quantize
@@ -89,9 +88,10 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
-            yarn_get_mscale(self.scaling_factor, float(mscale)) /
-            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
-            attn_factor)
+            yarn_get_mscale(self.scaling_factor, float(mscale))
+            / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
+            * attn_factor
+        )
 
         cache = self._compute_cos_sin_cache()
 
@@ -99,28 +99,25 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         self.register_buffer("cos_sin_cache", cache, persistable=False)
 
     def _compute_inv_freq(self, scaling_factor: float) -> paddle.Tensor:
-        pos_freqs = self.base**(paddle.arange(
-            0, self.rotary_dim, 2, dtype=paddle.float32) / self.rotary_dim)
+        pos_freqs = self.base ** (paddle.arange(0, self.rotary_dim, 2, dtype=paddle.float32) / self.rotary_dim)
 
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
-        low, high = yarn_find_correction_range(self.beta_fast, self.beta_slow,
-                                                self.rotary_dim, self.base,
-                                                self.max_position_embeddings)
+        low, high = yarn_find_correction_range(
+            self.beta_fast, self.beta_slow, self.rotary_dim, self.base, self.max_position_embeddings
+        )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (1 - yarn_linear_ramp_mask(
-            low, high, self.rotary_dim // 2)) * self.extrapolation_factor
-        inv_freq = inv_freq_interpolation * (
-            1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
+        inv_freq_mask = (1 - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2)) * self.extrapolation_factor
+        inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> paddle.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = paddle.arange(self.max_position_embeddings * self.scaling_factor, dtype=paddle.float32)
         freqs = paddle.einsum("i,j -> ij", t, inv_freq)
-        cos = (freqs.cos() * self.mscale)
-        sin = (freqs.sin() * self.mscale)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
         cache = paddle.concat((cos, sin), axis=-1)
         return cache
 
@@ -130,11 +127,11 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        query_rot = query[..., :self.rotary_dim]
-        key_rot = key[..., :self.rotary_dim]
+        query_rot = query[..., : self.rotary_dim]
+        key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim:]
-            key_pass = key[..., self.rotary_dim:]
+            query_pass = query[..., self.rotary_dim :]
+            key_pass = key[..., self.rotary_dim :]
 
         cos_sin = self.cos_sin_cache[position_ids]
         cos, sin = cos_sin.chunk(2, axis=-1)
@@ -147,6 +144,7 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
             x2 = x[..., 1::2]
             x = paddle.stack((-x2, x1), axis=-1)
             return x.flatten(-2)
+
         rotate_fn = _rotate_gptj
 
         query_rot = query_rot * cos + rotate_fn(query_rot) * sin
@@ -210,9 +208,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         if self.use_weight_only:
             assert (
                 self.quant_type == "weight_only_int8" or self.quant_type == "weight_only_int4"
-            ), "Expected quant_type equal to 'weight_only_int8' or 'weight_only_int4', but received {}".format(
-                self.quant_type
-            )
+            ), f"Expected quant_type equal to 'weight_only_int8' or 'weight_only_int4', but received {self.quant_type}"
 
         self.first_k_dense_replace = config.first_k_dense_replace
         self.n_routed_experts = config.n_routed_experts
@@ -230,17 +226,22 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             )
 
         self.norm = DeepseekV2RMSNorm(config)
- 
+
         scaling_factor = config.rope_scaling["factor"]
         original_max_position = config.rope_scaling["original_max_position_embeddings"]
         extra_kwargs = {
             k: v
             for k, v in config.rope_scaling.items()
-            if k in ("extrapolation_factor", "attn_factor", "beta_fast",
-                        "beta_slow", "mscale", "mscale_all_dim")
+            if k in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim")
         }
         self.rotary_emb = DeepseekScalingRotaryEmbedding(
-            config.qk_rope_head_dim, config.qk_rope_head_dim, original_max_position, config.rope_theta, scaling_factor, **extra_kwargs)
+            config.qk_rope_head_dim,
+            config.qk_rope_head_dim,
+            original_max_position,
+            config.rope_theta,
+            scaling_factor,
+            **extra_kwargs,
+        )
 
         # get ring_id
         ring_id = -1
@@ -252,7 +253,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             pass
 
         ln_scale_attrs = [
-            paddle.ParamAttr(name="fusedeepseek_v2.{}.ln_scale".format(i)) for i in range(self.num_layers)
+            paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.ln_scale") for idx in range(self.num_layers)
         ]
 
         q_a_proj_weight_attrs = None
@@ -263,97 +264,100 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         if self.config.q_lora_rank is not None:
             q_a_proj_weight_attrs = [
                 paddle.ParamAttr(
-                    name="fusedeepseek_v2.{}.q_a_proj_weight".format(i),
+                    name=f"fuse{self.base_model_prefix}.{idx}.q_a_proj_weight",
                     initializer=paddle.nn.initializer.Constant(value=0),
                 )
-                for i in range(self.num_layers)
+                for idx in range(self.num_layers)
             ]
             q_a_layernorm_weight_attrs = [
                 paddle.ParamAttr(
-                    name="fusedeepseek_v2.{}.q_a_layernorm_weight".format(i),
+                    name=f"fuse{self.base_model_prefix}.{idx}.q_a_layernorm_weight",
                     initializer=paddle.nn.initializer.Constant(value=1.0),
                 )
-                for i in range(self.num_layers)
+                for idx in range(self.num_layers)
             ]
             q_b_proj_weight_attrs = [
                 paddle.ParamAttr(
-                    name="fusedeepseek_v2.{}.q_b_proj_weight".format(i),
+                    name=f"fuse{self.base_model_prefix}.{idx}.q_b_proj_weight",
                     initializer=paddle.nn.initializer.Constant(value=0),
                 )
-                for i in range(self.num_layers)
+                for idx in range(self.num_layers)
             ]
         else:
             q_proj_weight_attrs = [
                 paddle.ParamAttr(
-                    name="fusedeepseek_v2.{}.q_proj_weight".format(i),
+                    name=f"fuse{self.base_model_prefix}.{idx}.q_proj_weight",
                     initializer=paddle.nn.initializer.Constant(value=0),
                 )
-                for i in range(self.num_layers)
+                for idx in range(self.num_layers)
             ]
 
         kv_a_proj_with_mqa_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.kv_a_proj_with_mqa_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.kv_a_proj_with_mqa_weight",
                 initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         kv_a_layernorm_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.kv_a_layernorm_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.kv_a_layernorm_weight",
                 initializer=paddle.nn.initializer.Constant(value=1.0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         kv_b_proj_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.kv_b_proj_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.kv_b_proj_weight",
                 initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
 
         out_proj_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.out_proj_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.out_proj_weight",
                 initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         ffn_ln_scale_attrs = [
-            paddle.ParamAttr(name="fusedeepseek_v2.{}.ffn_ln_scale".format(i)) for i in range(self.num_layers)
+            paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.ffn_ln_scale") for idx in range(self.num_layers)
         ]
         ffn1_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.ffn1_weight".format(i), initializer=paddle.nn.initializer.Constant(value=0)
+                name=f"fuse{self.base_model_prefix}.{idx}.ffn1_weight",
+                initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         ffn2_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.ffn2_weight".format(i), initializer=paddle.nn.initializer.Constant(value=0)
+                name=f"fuse{self.base_model_prefix}.{idx}.ffn2_weight",
+                initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         gate_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.gate_weight".format(i), initializer=paddle.nn.initializer.Constant(value=0)
+                name=f"fuse{self.base_model_prefix}.{idx}.gate_weight",
+                initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         shared_expert_ffn1_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.shared_expert_ffn1_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn1_weight",
                 initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
         shared_expert_ffn2_weight_attrs = [
             paddle.ParamAttr(
-                name="fusedeepseek_v2.{}.shared_expert_ffn2_weight".format(i),
+                name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn2_weight",
                 initializer=paddle.nn.initializer.Constant(value=0),
             )
-            for i in range(self.num_layers)
+            for idx in range(self.num_layers)
         ]
 
         out_proj_weight_scale_attrs = None
@@ -364,22 +368,24 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         if self.use_weight_only:
             out_proj_weight_scale_attrs = [
-                paddle.ParamAttr(name="fusedeepseek_v2.{}.out_proj_weight_scale".format(i))
-                for i in range(self.num_layers)
+                paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.out_proj_weight_scale")
+                for idx in range(self.num_layers)
             ]
             ffn1_weight_scale_attrs = [
-                paddle.ParamAttr(name="fusedeepseek_v2.{}.ffn1_weight_scale".format(i)) for i in range(self.num_layers)
+                paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.ffn1_weight_scale")
+                for idx in range(self.num_layers)
             ]
             ffn2_weight_scale_attrs = [
-                paddle.ParamAttr(name="fusedeepseek_v2.{}.ffn2_weight_scale".format(i)) for i in range(self.num_layers)
+                paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.ffn2_weight_scale")
+                for idx in range(self.num_layers)
             ]
             shared_expert_ffn1_weight_scale_attrs = [
-                paddle.ParamAttr(name="fusedeepseek_v2.{}.shared_expert_ffn1_weight_scale".format(i))
-                for i in range(self.num_layers)
+                paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn1_weight_scale")
+                for idx in range(self.num_layers)
             ]
             shared_expert_ffn2_weight_scale_attrs = [
-                paddle.ParamAttr(name="fusedeepseek_v2.{}.shared_expert_ffn2_weight_scale".format(i))
-                for i in range(self.num_layers)
+                paddle.ParamAttr(name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn2_weight_scale")
+                for idx in range(self.num_layers)
             ]
 
         mla_config = MLAConfig(
@@ -445,7 +451,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         self.set_transformer_block(transformer_config)
 
-
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -455,12 +460,14 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
     @paddle.no_grad()
     def set_state_dict(self, state_dict):
         self.transformer_block.init_weight()
-        # head_size = self.hidden_size // self.num_attention_heads
+
         dtype = paddle.get_default_dtype()
-        embed_tokens_weight = paddle.to_tensor(state_dict["deepseek_v2.embed_tokens.weight"]).cast(
+        embed_tokens_weight = paddle.to_tensor(state_dict[f"{self.base_model_prefix}.embed_tokens.weight"]).cast(
             self.embed_tokens.weight.dtype
         )
-        norm_weight = paddle.to_tensor(state_dict["deepseek_v2.norm.weight"]).cast(self.norm.weight.dtype)
+        norm_weight = paddle.to_tensor(state_dict[f"{self.base_model_prefix}.norm.weight"]).cast(
+            self.norm.weight.dtype
+        )
         self.embed_tokens.weight.set_value(embed_tokens_weight)
         self.norm.weight.set_value(norm_weight)
 
@@ -468,48 +475,48 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             logger.info("weight only is enabled")
         for idx in range(self.num_layers):
             logger.info(f"set state for layer {idx}")
-            unfused_state_dict = {}
-            ln_scale = paddle.to_tensor(state_dict["deepseek_v2.layers.{}.input_layernorm.weight".format(idx)]).cast(
-                self.transformer_block.ln_scales[idx].dtype
-            )
+
+            ln_scale = paddle.to_tensor(
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.input_layernorm.weight"]
+            ).cast(self.transformer_block.ln_scales[idx].dtype)
             self.transformer_block.ln_scales[idx].set_value(ln_scale)
 
             if self.config.q_lora_rank is not None:
                 q_a_proj_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.self_attn.q_a_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_proj.weight"]
                 ).cast(dtype)
                 self.transformer_block.q_a_proj_weights[idx].set_value(q_a_proj_weight)
                 q_a_layernorm_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.self_attn.q_a_layernorm.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_layernorm.weight"]
                 ).cast(dtype)
                 self.transformer_block.q_a_layernorm_weights[idx].set_value(q_a_layernorm_weight)
                 q_b_proj_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.self_attn.q_b_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight"]
                 ).cast(dtype)
                 self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_weight)
             else:
                 q_proj_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.self_attn.q_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_proj.weight"]
                 ).cast(dtype)
                 self.transformer_block.q_proj_weights[idx].set_value(q_proj_weight)
 
             kv_a_proj_with_mqa_weight = paddle.to_tensor(
-                state_dict["deepseek_v2.layers.{}.self_attn.kv_a_proj_with_mqa.weight".format(idx)]
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_proj_with_mqa.weight"]
             ).cast(dtype)
             self.transformer_block.kv_a_proj_with_mqa_weights[idx].set_value(kv_a_proj_with_mqa_weight)
 
             kv_a_layernorm_weight = paddle.to_tensor(
-                state_dict["deepseek_v2.layers.{}.self_attn.kv_a_layernorm.weight".format(idx)]
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_layernorm.weight"]
             ).cast(dtype)
             self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
 
             kv_b_proj_weight = paddle.to_tensor(
-                state_dict["deepseek_v2.layers.{}.self_attn.kv_b_proj.weight".format(idx)]
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"]
             ).cast(dtype)
             self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_weight)
 
             linear_weight = paddle.to_tensor(
-                state_dict["deepseek_v2.layers.{}.self_attn.o_proj.weight".format(idx)]
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight"]
             ).cast(dtype)
 
             if self.use_weight_only:
@@ -520,21 +527,18 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 self.transformer_block.linear_weights[idx].set_value(linear_weight)
 
             ffn_ln_scale = paddle.to_tensor(
-                state_dict["deepseek_v2.layers.{}.post_attention_layernorm.weight".format(idx)],
+                state_dict[f"{self.base_model_prefix}.layers.{idx}.post_attention_layernorm.weight"],
             ).cast(
                 self.transformer_block.ffn_ln_scales[idx].dtype,
             )
             self.transformer_block.ffn_ln_scales[idx].set_value(ffn_ln_scale)
             if idx < self.first_k_dense_replace:
-                unfused_state_dict["mlp.gate_proj.weight"] = state_dict[
-                    "deepseek_v2.layers.{}.mlp.gate_proj.weight".format(idx)
-                ]
-                unfused_state_dict["mlp.up_proj.weight"] = state_dict[
-                    "deepseek_v2.layers.{}.mlp.up_proj.weight".format(idx)
-                ]
-
                 concated_ffn1_weight = np.concatenate(
-                    [unfused_state_dict["mlp.gate_proj.weight"], unfused_state_dict["mlp.up_proj.weight"]], axis=-1
+                    [
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.gate_proj.weight"],
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.up_proj.weight"],
+                    ],
+                    axis=-1,
                 )
                 ffn1_weight_tensor = paddle.to_tensor(concated_ffn1_weight).cast(paddle.get_default_dtype())
 
@@ -548,7 +552,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.ffn1_weights[idx].set_value(ffn1_weight_tensor)
 
                 ffn2_weight_tensor = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.mlp.down_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.down_proj.weight"]
                 ).cast(paddle.get_default_dtype())
                 if self.use_weight_only:
                     ffn2_quanted_weight_tensor, ffn2_weight_scale_tensor = weight_quantize(
@@ -565,13 +569,13 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ffn2_scales = []
                 for expert_idx in range(self.n_routed_experts):
                     up_weight = paddle.to_tensor(
-                        state_dict["deepseek_v2.layers.{0}.mlp.experts.{1}.up_proj.weight".format(idx, expert_idx)]
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"]
                     ).cast(dtype)
                     gate_weight = paddle.to_tensor(
-                        state_dict["deepseek_v2.layers.{0}.mlp.experts.{1}.gate_proj.weight".format(idx, expert_idx)]
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"]
                     ).cast(dtype)
                     down_weight = paddle.to_tensor(
-                        state_dict["deepseek_v2.layers.{0}.mlp.experts.{1}.down_proj.weight".format(idx, expert_idx)]
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.down_proj.weight"]
                     ).cast(dtype)
 
                     if self.use_weight_only:
@@ -590,9 +594,9 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 fused_moe_ffn2_weight = paddle.to_tensor(ffn2_weights)
                 fused_moe_ffn1_weight_scale = paddle.to_tensor(ffn1_scales)
                 fused_moe_ffn2_weight_scale = paddle.to_tensor(ffn2_scales)
-                gate_weight = paddle.to_tensor(state_dict["deepseek_v2.layers.{}.mlp.gate.weight".format(idx)]).cast(
-                    "float32"
-                )
+                gate_weight = paddle.to_tensor(
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.gate.weight"]
+                ).cast("float32")
 
                 self.transformer_block.ffn1_weights[idx].set_value(fused_moe_ffn1_weight)
                 self.transformer_block.ffn2_weights[idx].set_value(fused_moe_ffn2_weight)
@@ -603,16 +607,16 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.ffn2_weights_scale[idx].set_value(fused_moe_ffn2_weight_scale)
 
                 shared_expert_ffn1gate_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.mlp.shared_experts.gate_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.gate_proj.weight"]
                 ).cast(dtype)
                 shared_expert_ffn1up_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.mlp.shared_experts.up_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.up_proj.weight"]
                 ).cast(dtype)
                 shared_expert_ffn1_weight = paddle.concat(
                     x=[shared_expert_ffn1gate_weight, shared_expert_ffn1up_weight], axis=-1
                 )
                 shared_expert_ffn2_weight = paddle.to_tensor(
-                    state_dict["deepseek_v2.layers.{}.mlp.shared_experts.down_proj.weight".format(idx)]
+                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.down_proj.weight"]
                 ).cast(dtype)
 
                 if self.use_weight_only:
@@ -829,8 +833,7 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
                 max_block_nums,
                 config.num_key_value_heads // max(config.tensor_parallel_degree, 1),
                 config.block_size,
-                # config.hidden_size // config.num_attention_heads,
-                config.qk_nope_head_dim + config.qk_rope_head_dim
+                config.qk_nope_head_dim + config.qk_rope_head_dim,
             ]
             cache_kvs.append(cache_kv_shape)
             cache_kvs.append(cache_kv_shape)
