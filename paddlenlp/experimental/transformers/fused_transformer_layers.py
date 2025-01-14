@@ -1135,10 +1135,10 @@ class FusedMultiTransformerBase(Layer):
             self.ffn1_weights[i],
             self.ffn2_weights[i],
             self.ffn1_biases[i],
-            None,
+            self.ffn1_weights_scale[i] if hasattr(self, "ffn1_weights_scale") else None,
             self.ffn2_biases[i],
-            None,
-            "None",
+            self.ffn2_weights_scale[i] if hasattr(self, "ffn2_weights_scale") else None,
+            self.quant_type if hasattr(self, "quant_type") else "None",
             self.config.moe_config.top_k,
             self.config.moe_config.norm_topk_prob,
         )
@@ -1670,7 +1670,6 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
 
     def compute_qkv_linear(self, ln_out, i):
         if self.config.mla_config.use_mla():
-            # breakpoint()
             if self.config.mla_config.q_lora_rank is not None:
                 query = weight_only_linear(
                     ln_out,
@@ -1774,22 +1773,6 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
             weight_scale=self.linear_weights_scale[i],
             weight_dtype=self.weight_dtype,
         )
-
-    def compute_fused_moe(self, tmp_out, i):
-        fused_moe_out = fused_moe(
-            tmp_out,
-            self.gate_weights[i],
-            self.ffn1_weights[i],
-            self.ffn2_weights[i],
-            self.ffn1_biases[i],
-            self.ffn1_weights_scale[i],
-            self.ffn2_biases[i],
-            self.ffn2_weights_scale[i],
-            self.quant_type,
-            self.config.moe_config.top_k,
-            self.config.moe_config.norm_topk_prob,
-        )
-        return fused_moe_out
 
     def compute_ffn1(self, tmp_out, i):
         return weight_only_linear(

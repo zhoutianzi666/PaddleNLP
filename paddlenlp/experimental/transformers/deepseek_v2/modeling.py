@@ -715,19 +715,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.shared_expert_ffn1_weights[idx].set_value(shared_expert_ffn1_weight)
                     self.transformer_block.shared_expert_ffn2_weights[idx].set_value(shared_expert_ffn2_weight)
 
-    # This function is a little different from prepare_input_ids_for_generation in paddlenlp/transformers/generation/utils.py,
-    # it is used to generate fake input_ids according to inputs_embeds length.
-    @staticmethod
-    def prepare_input_ids_for_generation(bos_token_id, encoder_output=None):
-        batch_size = 1
-        seq_len = 1
-        if bos_token_id is None:
-            raise ValueError("`bos_token_id` should be defined when no " "`input_ids` are provided.")
-        if encoder_output is not None:
-            batch_size = encoder_output.shape[0]
-            seq_len = encoder_output.shape[1]
-        return paddle.full([batch_size, seq_len], bos_token_id, dtype="int64")
-
     def set_transformer_block(self, transformer_config):
         if self.use_weight_only:
             self.transformer_block = FusedBlockMultiTransformerWeightOnly(transformer_config)
