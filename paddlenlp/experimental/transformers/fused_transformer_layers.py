@@ -27,6 +27,9 @@ from paddle.incubate.nn.functional import (
     fused_moe,
     fused_rms_norm,
     masked_multihead_attention,
+    moe_dispatch,
+    moe_ffn,
+    moe_reduce,
     variable_length_memory_efficient_attention,
 )
 from paddle.nn import Layer
@@ -109,11 +112,13 @@ class MoeConfig:
     num_experts: int = 0
     top_k: int = 0
     topk_method: Optional[str] = None
+    num_expert_group: int = 1
     topk_group: Optional[int] = None
     norm_topk_prob: bool = True
     moe_every2: bool = False
     first_k_dense_replace: int = 0
     moe_intermediate_size: int = 0
+    routed_scaling_factor: float = 1.0
 
     shared_expert_with_gate: bool = True
 
@@ -224,6 +229,7 @@ class FusedMultiTransformerConfig:
         ffn2_weight_attrs=None,
         ffn2_weight_scale_attrs=None,
         ffn2_bias_attrs=None,
+        e_score_correction_bias_attrs=None,
         qkv_out_scale_attrs=None,
         linear_out_scale_attrs=None,
         ffn1_out_scale_attrs=None,
@@ -297,6 +303,8 @@ class FusedMultiTransformerConfig:
         self.ffn2_weight_attrs = ffn2_weight_attrs
         self.ffn2_weight_scale_attrs = ffn2_weight_scale_attrs
         self.ffn2_bias_attrs = ffn2_bias_attrs
+
+        self.e_score_correction_bias_attrs = e_score_correction_bias_attrs
 
         self.qkv_out_scale_attrs = qkv_out_scale_attrs
         self.linear_out_scale_attrs = linear_out_scale_attrs
@@ -416,6 +424,7 @@ class FusedMultiTransformerBase(Layer):
         self.ffn_ln_scales, self.ffn_ln_biases = [], []
         self.ffn1_biases = []
         self.ffn2_biases = []
+        self.e_score_correction_biases = []
 
         self.shared_expert_gate_weights = []
         self.shared_expert_ffn1_weights = []
@@ -437,14 +446,7 @@ class FusedMultiTransformerBase(Layer):
             ffn_ln_bias_attr = self.get_attr(config.ffn_ln_bias_attrs, i)
             ffn1_bias_attr = self.get_attr(config.ffn1_bias_attrs, i)
             ffn2_bias_attr = self.get_attr(config.ffn2_bias_attrs, i)
-
-            if self.config.moe_config.use_shared_expert(i):
-                if self.config.moe_config.shared_expert_with_gate:
-                    shared_expert_gate_weight_attr = self.get_attr(
-                        config.moe_config.shared_expert_gate_weight_attrs, i
-                    )
-                shared_expert_ffn1_weight_attr = self.get_attr(config.moe_config.shared_expert_ffn1_weight_attrs, i)
-                shared_expert_ffn2_weight_attr = self.get_attr(config.moe_config.shared_expert_ffn2_weight_attrs, i)
+            e_score_correction_bias_attr = self.get_attr(config.e_score_correction_bias_attrs, i)
 
             cache_k_scale_attr = self.get_attr(config.cache_k_scale_attrs, i)
             cache_v_scale_attr = self.get_attr(config.cache_v_scale_attrs, i)
@@ -522,6 +524,16 @@ class FusedMultiTransformerBase(Layer):
                         is_bias=True,
                     )
 
+            e_score_correction_bias = None
+            if self.config.moe_config.use_moe(i):
+                if self.config.moe_config.topk_method == "noaux_tc":
+                    e_score_correction_bias = self.create_parameter(
+                        shape=[self.config.moe_config.num_experts],
+                        attr=e_score_correction_bias_attr,
+                        dtype="float32",
+                        is_bias=True,
+                    )
+
             ffn2_bias = None
             if ffn2_bias_attr:
                 if self.config.moe_config.use_moe(i):
@@ -539,30 +551,9 @@ class FusedMultiTransformerBase(Layer):
                         is_bias=True,
                     )
 
-            shared_expert_ffn1_weight = None
-            shared_expert_ffn2_weight = None
-            shared_expert_gate_weight = None
-            if self.config.moe_config.use_shared_expert(i):
-                shared_expert_ffn1_weight = self.create_parameter(
-                    shape=self.shared_expert_ffn1_weight_shape,
-                    attr=shared_expert_ffn1_weight_attr,
-                    dtype=self.create_params_type,
-                )
-                shared_expert_ffn2_weight = self.create_parameter(
-                    shape=self.shared_expert_ffn2_weight_shape,
-                    attr=shared_expert_ffn2_weight_attr,
-                    dtype=self.create_params_type,
-                )
-                if self.config.moe_config.shared_expert_with_gate:
-                    shared_expert_gate_weight = self.create_parameter(
-                        shape=self.shared_expert_gate_weight_shape,
-                        attr=shared_expert_gate_weight_attr,
-                        dtype=self._helper.get_default_dtype(),
-                    )
-
             cache_scale_dtype = "float32"
             if self.config.append_attn:
-                cache_scale_dtype = paddle.get_default_dtype()
+                cache_scale_dtype = self._dtype
 
             cache_k_scale = None
             if cache_k_scale_attr:
@@ -605,9 +596,6 @@ class FusedMultiTransformerBase(Layer):
                 # column parallel
                 _set_var_distributed(qkv_bias)
                 _set_var_distributed(ffn1_bias)
-                if self.config.moe_config.use_shared_expert(i):
-                    _set_var_distributed(shared_expert_ffn1_weight)
-                    _set_var_distributed(shared_expert_ffn2_weight)
 
             self.ln_scales.append(ln_scale)
             self.ln_biases.append(ln_bias)
@@ -618,10 +606,7 @@ class FusedMultiTransformerBase(Layer):
             self.ffn_ln_biases.append(ffn_ln_bias)
             self.ffn1_biases.append(ffn1_bias)
             self.ffn2_biases.append(ffn2_bias)
-
-            self.shared_expert_ffn1_weights.append(shared_expert_ffn1_weight)
-            self.shared_expert_ffn2_weights.append(shared_expert_ffn2_weight)
-            self.shared_expert_gate_weights.append(shared_expert_gate_weight)
+            self.e_score_correction_biases.append(e_score_correction_bias)
 
             self.cache_k_scales.append(cache_k_scale)
             self.cache_v_scales.append(cache_v_scale)
@@ -637,12 +622,6 @@ class FusedMultiTransformerBase(Layer):
             self._add_parameter(ffn_ln_bias)
             self._add_parameter(ffn1_bias)
             self._add_parameter(ffn2_bias)
-
-            if self.config.moe_config.use_shared_expert(i):
-                self._add_parameter(shared_expert_ffn1_weight)
-                self._add_parameter(shared_expert_ffn2_weight)
-                if self.config.moe_config.shared_expert_with_gate:
-                    self._add_parameter(shared_expert_gate_weight)
 
             self._add_parameter(cache_k_scale)
             self._add_parameter(cache_v_scale)
@@ -762,14 +741,6 @@ class FusedMultiTransformerBase(Layer):
                     dtype=self.create_params_type,
                     is_bias=False,
                 )
-            else:
-                ffn1_weight = self.create_parameter(
-                    shape=self.ffn1_weight_shape,
-                    attr=ffn1_weight_attr,
-                    dtype=self.create_params_type,
-                    is_bias=False,
-                )
-            if self.config.moe_config.use_moe(i):
                 ffn2_weight = self.create_parameter(
                     shape=self.moe_ffn2_weight_shape,
                     attr=ffn2_weight_attr,
@@ -777,12 +748,50 @@ class FusedMultiTransformerBase(Layer):
                     is_bias=False,
                 )
             else:
+                ffn1_weight = self.create_parameter(
+                    shape=self.ffn1_weight_shape,
+                    attr=ffn1_weight_attr,
+                    dtype=self.create_params_type,
+                    is_bias=False,
+                )
                 ffn2_weight = self.create_parameter(
                     shape=self.ffn2_weight_shape,
                     attr=ffn2_weight_attr,
                     dtype=self.create_params_type,
                     is_bias=False,
                 )
+
+            shared_expert_ffn1_weight = None
+            shared_expert_ffn2_weight = None
+            shared_expert_gate_weight = None
+            if self.config.moe_config.use_shared_expert(i):
+                if self.config.moe_config.shared_expert_with_gate:
+                    shared_expert_gate_weight_attr = self.get_attr(
+                        self.config.moe_config.shared_expert_gate_weight_attrs, i
+                    )
+                shared_expert_ffn1_weight_attr = self.get_attr(
+                    self.config.moe_config.shared_expert_ffn1_weight_attrs, i
+                )
+                shared_expert_ffn2_weight_attr = self.get_attr(
+                    self.config.moe_config.shared_expert_ffn2_weight_attrs, i
+                )
+
+                shared_expert_ffn1_weight = self.create_parameter(
+                    shape=self.shared_expert_ffn1_weight_shape,
+                    attr=shared_expert_ffn1_weight_attr,
+                    dtype=self.create_params_type,
+                )
+                shared_expert_ffn2_weight = self.create_parameter(
+                    shape=self.shared_expert_ffn2_weight_shape,
+                    attr=shared_expert_ffn2_weight_attr,
+                    dtype=self.create_params_type,
+                )
+                if self.config.moe_config.shared_expert_with_gate:
+                    shared_expert_gate_weight = self.create_parameter(
+                        shape=self.shared_expert_gate_weight_shape,
+                        attr=shared_expert_gate_weight_attr,
+                        dtype=self._helper.get_default_dtype(),
+                    )
 
             # tensor model parallel
             if self.config.nranks > 1:
@@ -792,6 +801,10 @@ class FusedMultiTransformerBase(Layer):
                 # row parallel
                 _set_var_distributed(linear_weight)
                 _set_var_distributed(ffn2_weight)
+
+                if self.config.moe_config.use_shared_expert(i):
+                    _set_var_distributed(shared_expert_ffn1_weight)
+                    _set_var_distributed(shared_expert_ffn2_weight)
 
             if self.config.mla_config.use_mla():
                 if self.config.mla_config.q_lora_rank is None:
@@ -812,6 +825,10 @@ class FusedMultiTransformerBase(Layer):
             self.ffn1_weights.append(ffn1_weight)
             self.ffn2_weights.append(ffn2_weight)
 
+            self.shared_expert_ffn1_weights.append(shared_expert_ffn1_weight)
+            self.shared_expert_ffn2_weights.append(shared_expert_ffn2_weight)
+            self.shared_expert_gate_weights.append(shared_expert_gate_weight)
+
             if self.config.mla_config.use_mla():
                 if self.config.mla_config.q_lora_rank is None:
                     self._add_parameter(q_proj_weight)
@@ -824,6 +841,12 @@ class FusedMultiTransformerBase(Layer):
                 self._add_parameter(kv_b_proj_weight)
             else:
                 self._add_parameter(qkv_weight)
+
+            if self.config.moe_config.use_shared_expert(i):
+                self._add_parameter(shared_expert_ffn1_weight)
+                self._add_parameter(shared_expert_ffn2_weight)
+                if self.config.moe_config.shared_expert_with_gate:
+                    self._add_parameter(shared_expert_gate_weight)
 
             self._add_parameter(linear_weight)
 
@@ -1130,19 +1153,106 @@ class FusedMultiTransformerBase(Layer):
         return tmp_out, residual_input
 
     def compute_fused_moe(self, tmp_out, i):
-        fused_moe_out = fused_moe(
-            tmp_out,
-            self.gate_weights[i],
-            self.ffn1_weights[i],
-            self.ffn2_weights[i],
-            self.ffn1_biases[i],
-            self.ffn1_weights_scale[i] if hasattr(self, "ffn1_weights_scale") else None,
-            self.ffn2_biases[i],
-            self.ffn2_weights_scale[i] if hasattr(self, "ffn2_weights_scale") else None,
-            self.quant_type if hasattr(self, "quant_type") else "None",
-            self.config.moe_config.top_k,
-            self.config.moe_config.norm_topk_prob,
-        )
+        def get_moe_scores(
+            gating_output: paddle.Tensor,
+            config: MoeConfig,
+            e_score_correction_bias: Optional[paddle.Tensor] = None,
+        ) -> paddle.Tensor:
+
+            num_token = gating_output.shape[0]
+            num_expert_group = config.num_expert_group
+            topk_group = config.topk_group
+
+            # Compute softmax or sigmoid scores based on the topk_method
+            if config.topk_method == "greedy":
+                scores = paddle.nn.functional.softmax(gating_output, axis=-1)
+                return scores
+
+            if config.topk_method == "group_limited_greedy":
+                scores = paddle.nn.functional.softmax(gating_output, axis=-1)
+                group_scores = scores.reshape([num_token, num_expert_group, -1]).max(axis=-1)  # [n, num_expert_group]
+            elif config.topk_method == "noaux_tc":
+                if e_score_correction_bias is None:
+                    raise ValueError("e_score_correction_bias must be provided for 'noaux_tc' method.")
+                scores = paddle.nn.functional.sigmoid(gating_output) + e_score_correction_bias.unsqueeze(0)
+                group_scores = (
+                    scores.reshape([num_token, num_expert_group, -1]).topk(2, axis=-1)[0].sum(axis=-1)
+                )  # [n, num_expert_group]
+            else:
+                raise ValueError(
+                    f"Unsupported topk_method: {config.topk_method}. Please choose 'group_limited_greedy' or 'noaux_tc'."
+                )
+
+            # Identify top-k groups
+            group_idx = paddle.topk(group_scores, k=topk_group, axis=-1, sorted=False)[1]  # [n, topk_group]
+
+            group_mask = paddle.zeros_like(group_scores, dtype="int64")  # [n, num_expert_group]
+            group_mask.put_along_axis_(group_idx, 1, axis=1)
+
+            # Apply group mask to the scores
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand([num_token, num_expert_group, scores.shape[-1] // num_expert_group])
+                .reshape([num_token, -1])
+                .astype("float32")
+            )  # [n, e]
+
+            # Scale the scores with the mask and scaling factor
+            scores = scores * score_mask
+
+            return scores
+
+        if self.config.moe_config.topk_method is not None:
+            gate_out = paddle.matmul(tmp_out.cast("float32"), self.gate_weights[i])
+            # 应用各种策略后重塑的scores
+            scores = get_moe_scores(gate_out, self.config.moe_config, self.e_score_correction_biases[i])
+            # topk在moe_dispatch中
+            (
+                permute_input,
+                token_nums_per_expert,
+                permute_indices_per_token,
+                expert_scales_float,
+                top_k_indices,
+            ) = moe_dispatch(tmp_out, scores, self.config.moe_config.top_k, False, topk_only_mode=True)
+
+            ffn_out = moe_ffn(
+                permute_input,
+                token_nums_per_expert,
+                self.ffn1_weights[i],
+                self.ffn2_weights[i],
+                self.ffn1_biases[i],
+                self.ffn1_weights_scale[i] if hasattr(self, "ffn1_weights_scale") else None,
+                self.ffn2_weights_scale[i] if hasattr(self, "ffn2_weights_scale") else None,
+                self.quant_type if hasattr(self, "quant_type") else "None",
+            )
+
+            # ffn1_biases要拆分tp的各个卡上，或者只在0卡上，省略此处reduce，减少一次reduce
+            if self.nranks > 1:
+                dist.all_reduce(ffn_out)
+
+            fused_moe_out = moe_reduce(
+                ffn_out,
+                expert_scales_float,
+                permute_indices_per_token,
+                top_k_indices,
+                self.ffn2_biases[i],
+                norm_topk_prob=self.config.moe_config.norm_topk_prob,
+                routed_scaling_factor=self.config.moe_config.routed_scaling_factor,  # reduce中会做topk个weight的norm和routed_scaling_factor
+            )
+        else:
+            fused_moe_out = fused_moe(
+                tmp_out,
+                self.gate_weights[i],
+                self.ffn1_weights[i],
+                self.ffn2_weights[i],
+                self.ffn1_biases[i],
+                self.ffn1_weights_scale[i] if hasattr(self, "ffn1_weights_scale") else None,
+                self.ffn2_biases[i],
+                self.ffn2_weights_scale[i] if hasattr(self, "ffn2_weights_scale") else None,
+                self.quant_type if hasattr(self, "quant_type") else "None",
+                self.config.moe_config.top_k,
+                self.config.moe_config.norm_topk_prob,
+            )
         return fused_moe_out
 
     def compute_activation(self, ffn1_out, i):

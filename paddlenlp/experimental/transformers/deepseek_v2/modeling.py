@@ -214,7 +214,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         if config.tensor_parallel_degree > config.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {config.tensor_parallel_degree} is greater than "
-                f"the number of experts {config.n_routed_experts}.")
+                f"the number of experts {config.n_routed_experts}."
+            )
 
         if config.tensor_parallel_degree > 1 and config.vocab_size % config.tensor_parallel_degree == 0:
             self.embed_tokens = fleet.meta_parallel.VocabParallelEmbedding(
@@ -348,6 +349,13 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             )
             for idx in range(self.num_layers)
         ]
+        e_score_correction_bias_attrs = [
+            paddle.ParamAttr(
+                name=f"fuse{self.base_model_prefix}.{idx}.e_score_correction_bias",
+                initializer=paddle.nn.initializer.Constant(value=0),
+            )
+            for idx in range(self.num_layers)
+        ]
         shared_expert_ffn1_weight_attrs = [
             paddle.ParamAttr(
                 name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn1_weight",
@@ -457,6 +465,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             top_k=self.config.num_experts_per_tok,
             topk_group=self.config.topk_group,
             norm_topk_prob=self.config.norm_topk_prob,
+            routed_scaling_factor=self.config.routed_scaling_factor,
+            num_expert_group=self.config.n_group,
             topk_method=self.config.topk_method,
             moe_intermediate_size=self.config.moe_intermediate_size,
             first_k_dense_replace=self.first_k_dense_replace,
@@ -487,6 +497,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             ffn1_weight_scale_attrs=ffn1_weight_scale_attrs,
             ffn2_weight_attrs=ffn2_weight_attrs,
             ffn2_weight_scale_attrs=ffn2_weight_scale_attrs,
+            e_score_correction_bias_attrs=e_score_correction_bias_attrs,
             epsilon=self.rms_norm_eps,
             rope_theta=self.rope_theta,
             rotary_emb=self.rotary_emb,
