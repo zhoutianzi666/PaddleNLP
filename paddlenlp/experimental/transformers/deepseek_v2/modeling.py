@@ -126,19 +126,19 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        q = query[..., : self.rotary_dim]
-        k = key[..., : self.rotary_dim]
+        query_rot = query[..., : self.rotary_dim]
+        key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
         cos_sin = self.cos_sin_cache[position_ids].unsqueeze(1)
         cos, sin = cos_sin.chunk(2, axis=-1)
 
-        s, h, d = q.shape
-        q = q.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
+        s, h, d = query_rot.shape
+        query_rot = query_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
-        s, h, d = k.shape
-        k = k.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
+        s, h, d = key_rot.shape
+        key_rot = key_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
         def rotate_half(x):
             """Rotates half the hidden axiss of the input."""
@@ -146,8 +146,8 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
             x2 = x[..., x.shape[-1] // 2 :]
             return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
 
-        query_rot = (q * cos) + (rotate_half(q) * sin)
-        key_rot = (k * cos) + (rotate_half(k) * sin)
+        query_rot = (query_rot * cos) + (rotate_half(query_rot) * sin)
+        key_rot = (key_rot * cos) + (rotate_half(key_rot) * sin)
 
         if self.rotary_dim < self.head_size:
             query = paddle.concat((query_rot, query_pass), axis=-1)
@@ -564,6 +564,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                         q_b_proj_weight, algo=self.quant_algo
                     )
                     self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_quanted_weight)
+                    self.transformer_block.q_a_layernorm_weights[idx].set_value(q_a_layernorm_weight)
                     self.transformer_block.q_b_proj_weights_scale[idx].set_value(q_b_proj_weight_scale)
                 else:
                     self.transformer_block.q_a_proj_weights[idx].set_value(q_a_proj_weight)
@@ -602,6 +603,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     kv_b_proj_weight, algo=self.quant_algo
                 )
                 self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_quanted_weight)
+                self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
                 self.transformer_block.kv_b_proj_weights_scale[idx].set_value(kv_b_proj_weight_scale)
             else:
                 self.transformer_block.kv_a_proj_with_mqa_weights[idx].set_value(kv_a_proj_with_mqa_weight)
