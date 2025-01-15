@@ -949,7 +949,7 @@ class FusedMultiTransformerBase(Layer):
 
         return ln_out
 
-    def compute_qkv_linear(self, ln_out, i):
+    def compute_qkv_linear(self, ln_out, i, position_ids=None):
         if self.config.mla_config.use_mla():
             if self.config.mla_config.q_lora_rank is not None:
                 query = paddle.matmul(ln_out, self.q_a_proj_weights[i])
@@ -989,7 +989,6 @@ class FusedMultiTransformerBase(Layer):
                 key_value, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
             )
 
-            position_ids = paddle.arange(ln_out.shape[0]).reshape((1, -1))
             query_pe, key_pe = self.config.rotary_emb(position_ids, query_pe, key_pe)
 
             query[..., self.config.mla_config.qk_nope_head_dim :] = query_pe
@@ -1018,9 +1017,9 @@ class FusedMultiTransformerBase(Layer):
 
         return qkv_out
 
-    def compute_qkv(self, src, residual_input, i):
+    def compute_qkv(self, src, residual_input, i, position_ids=None):
         ln_out = self.compute_layernorm_before_qkv(src, i)
-        qkv_out = self.compute_qkv_linear(ln_out, i)
+        qkv_out = self.compute_qkv_linear(ln_out, i, position_ids)
         return qkv_out, residual_input
 
     def compute_max_len(self, seq_lens_encoder, seq_lens_decoder, cum_offsets):
@@ -1406,10 +1405,23 @@ class FusedMultiTransformerBase(Layer):
                 kwargs.get("block_size", 64),
                 self.config.speculate_config.speculate_max_draft_token_num,
             )
+        seq_lens_this_time = kwargs.get("seq_lens_this_time", None)
+        bsz = seq_lens_this_time.shape[0]
+        position_ids = []
+        for i in range(bsz):
+            cur_seq_len = kwargs.get("seq_lens_encoder", None)[i]
+            if cur_seq_len > 0:
+                for j in range(cur_seq_len):
+                    position_ids.append(j)
+            else:
+                ids = kwargs.get("seq_lens_decoder", None)[i].item()
 
+                if ids > 0:
+                    position_ids.append(ids)
+        # print("position_ids;", position_ids)
         residual_input = src
         for i in range(self.num_layers):
-            qkv_out, residual_input = self.compute_qkv(src, residual_input, i)
+            qkv_out, residual_input = self.compute_qkv(src, residual_input, i, position_ids)
             out_linear_out = self.compute_attn(
                 time_step,
                 qkv_out,
