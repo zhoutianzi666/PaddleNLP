@@ -114,8 +114,9 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = paddle.arange(self.max_position_embeddings * self.scaling_factor, dtype=paddle.float32)
         freqs = paddle.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos() * self.mscale
-        sin = freqs.sin() * self.mscale
+        emb = paddle.concat((freqs, freqs), axis=-1)
+        cos = emb.cos() * self.mscale
+        sin = emb.sin() * self.mscale
         cache = paddle.concat((cos, sin), axis=-1)
         return cache
 
@@ -125,28 +126,28 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
+        q = query[..., : self.rotary_dim]
+        k = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
-
-        cos_sin = self.cos_sin_cache[position_ids]
+        cos_sin = self.cos_sin_cache[position_ids].unsqueeze(1)
         cos, sin = cos_sin.chunk(2, axis=-1)
 
-        cos = cos.repeat_interleave(2, axis=-1).unsqueeze(-2)
-        sin = sin.repeat_interleave(2, axis=-1).unsqueeze(-2)
+        s, h, d = q.shape
+        q = q.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
-        def _rotate_gptj(x: paddle.Tensor) -> paddle.Tensor:
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
-            x = paddle.stack((-x2, x1), axis=-1)
-            return x.flatten(-2)
+        s, h, d = k.shape
+        k = k.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
-        rotate_fn = _rotate_gptj
+        def rotate_half(x):
+            """Rotates half the hidden axiss of the input."""
+            x1 = x[..., : x.shape[-1] // 2]
+            x2 = x[..., x.shape[-1] // 2 :]
+            return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
 
-        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
-        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+        query_rot = (q * cos) + (rotate_half(q) * sin)
+        key_rot = (k * cos) + (rotate_half(k) * sin)
 
         if self.rotary_dim < self.head_size:
             query = paddle.concat((query_rot, query_pass), axis=-1)
