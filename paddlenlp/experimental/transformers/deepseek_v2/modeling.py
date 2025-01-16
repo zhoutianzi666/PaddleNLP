@@ -350,13 +350,17 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             )
             for idx in range(self.num_layers)
         ]
-        e_score_correction_bias_attrs = [
-            paddle.ParamAttr(
-                name=f"fuse{self.base_model_prefix}.{idx}.e_score_correction_bias",
-                initializer=paddle.nn.initializer.Constant(value=0),
-            )
-            for idx in range(self.num_layers)
-        ]
+
+        e_score_correction_bias_attrs = None
+        if self.base_model_prefix == "deepseek_v3":
+            e_score_correction_bias_attrs = [
+                paddle.ParamAttr(
+                    name=f"fuse{self.base_model_prefix}.{idx}.e_score_correction_bias",
+                    initializer=paddle.nn.initializer.Constant(value=0),
+                )
+                for idx in range(self.num_layers)
+            ]
+
         shared_expert_ffn1_weight_attrs = [
             paddle.ParamAttr(
                 name=f"fuse{self.base_model_prefix}.{idx}.shared_expert_ffn1_weight",
@@ -692,6 +696,12 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 gate_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.gate.weight"]
                 ).cast("float32")
+
+                if self.base_model_prefix == "deepseek_v3":
+                    e_score_correction_bias = paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.gate.e_score_correction_bias"]
+                    ).cast("float32")
+                    self.transformer_block.e_score_correction_biases[idx].set_value(e_score_correction_bias)
 
                 self.transformer_block.ffn1_weights[idx].set_value(fused_moe_ffn1_weight)
                 self.transformer_block.ffn2_weights[idx].set_value(fused_moe_ffn2_weight)

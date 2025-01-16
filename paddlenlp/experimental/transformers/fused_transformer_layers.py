@@ -527,14 +527,15 @@ class FusedMultiTransformerBase(Layer):
                     )
 
             e_score_correction_bias = None
-            if self.config.moe_config.use_moe(i):
-                if self.config.moe_config.topk_method == "noaux_tc":
-                    e_score_correction_bias = self.create_parameter(
-                        shape=[self.config.moe_config.num_experts],
-                        attr=e_score_correction_bias_attr,
-                        dtype="float32",
-                        is_bias=True,
-                    )
+            if e_score_correction_bias_attr:
+                if self.config.moe_config.use_moe(i):
+                    if self.config.moe_config.topk_method == "noaux_tc":
+                        e_score_correction_bias = self.create_parameter(
+                            shape=[self.config.moe_config.num_experts],
+                            attr=e_score_correction_bias_attr,
+                            dtype="float32",
+                            is_bias=True,
+                        )
 
             ffn2_bias = None
             if ffn2_bias_attr:
