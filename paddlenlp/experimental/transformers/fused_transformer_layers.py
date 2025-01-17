@@ -389,8 +389,11 @@ class FusedMultiTransformerBase(Layer):
         self.activation = config.activation
 
         self.embed_dim = config.embed_dim
-        self.head_dim = config.embed_dim // config.num_heads
-        assert self.head_dim * config.num_heads == config.embed_dim, "embed_dim must be divisible by num_heads"
+        if config.mla_config.use_mla():
+            self.head_dim = config.mla_config.v_head_dim
+        else:
+            self.head_dim = config.embed_dim // config.num_heads
+            assert self.head_dim * config.num_heads == config.embed_dim, "embed_dim must be divisible by num_heads"
 
         # tensor model parallel
         if config.nranks > 1:
@@ -410,10 +413,11 @@ class FusedMultiTransformerBase(Layer):
         if config.qkv_weight_attrs is not None and isinstance(config.qkv_weight_attrs, (list, tuple)):
             assert self.num_layers == len(config.qkv_weight_attrs)
 
-        self.softmax_scale = float(self.head_dim**-0.5)
         if self.config.mla_config.use_mla():
             mscale = self.config.mla_config.mscale
-            self.softmax_scale = self.softmax_scale * mscale * mscale
+            self.softmax_scale = float(self.config.mla_config.qk_head_dim**-0.5) * mscale * mscale
+        else:
+            self.softmax_scale = float(self.head_dim**-0.5)
 
         self.position_ids: list[int] = []
 
