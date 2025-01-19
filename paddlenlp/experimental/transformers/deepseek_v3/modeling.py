@@ -16,12 +16,11 @@ from __future__ import annotations
 from paddlenlp.experimental.transformers.deepseek_v2.modeling import (
     DeepseekV2ForCausalLMBlockInferenceModel,
 )
-from paddlenlp.transformers import DeepseekV2Config
+from paddlenlp.transformers import DeepseekV3Config
 
 __all__ = ["DeepseekV3ForCausalLMBlockInferenceModel"]
 
 
 class DeepseekV3ForCausalLMBlockInferenceModel(DeepseekV2ForCausalLMBlockInferenceModel):
-    def __init__(self, config: DeepseekV2Config):
-        super().__init__(config)
-        self.deepseek_v2.base_model_prefix = "deepseek_v3"
+    def __init__(self, config: DeepseekV3Config, base_model_prefix: str = "deepseek_v3"):
+        super().__init__(config, base_model_prefix)

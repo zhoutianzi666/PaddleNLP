@@ -174,8 +174,9 @@ class DeepseekV2RMSNorm(nn.Layer):
 
 @register_base_model
 class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
-    def __init__(self, config: DeepseekV2Config):
+    def __init__(self, config: DeepseekV2Config, base_model_prefix: str):
         super(DeepseekV2PretrainedModel, self).__init__(config)
+        self.base_model_prefix = base_model_prefix
 
         self.config = config
 
@@ -814,13 +815,15 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
 
     _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
 
-    def __init__(self, config):
+    def __init__(self, config: DeepseekV2Config, base_model_prefix: str = "deepseek_v2"):
         super().__init__(config)
+        self.base_model_prefix = base_model_prefix
+
         self.max_candidate_len = config.get("speculate_max_candidate_len", 5)
         self.verify_window = config.get("speculate_verify_window", 2)
         self.max_seq_len = config.max_seq_len
 
-        self.deepseek_v2 = DeepseekV2BlockInferenceModel(config)
+        self.deepseek_v2 = DeepseekV2BlockInferenceModel(config, base_model_prefix)
         if config.tie_word_embeddings:
             self.lm_head = DeepSeekV2LMHead(
                 config, embedding_weights=self.deepseek_v2.embed_tokens.weight, transpose_y=True

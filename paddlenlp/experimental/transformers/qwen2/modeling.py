@@ -87,8 +87,10 @@ class FusedQwen2RMSNorm(nn.Layer):
 
 @register_base_model
 class Qwen2InferenceModel(Qwen2PretrainedModel):
-    def __init__(self, config: Qwen2Config):
+    def __init__(self, config: Qwen2Config, base_model_prefix: str):
         super(Qwen2PretrainedModel, self).__init__(config)
+        self.base_model_prefix = base_model_prefix
+
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
@@ -1214,9 +1216,9 @@ class Qwen2ForCausalLMInferenceModel(GenerationInferenceModel, Qwen2PretrainedMo
 
 @register_base_model
 class Qwen2BlockInferenceModel(Qwen2InferenceModel):
-    def __init__(self, config: Qwen2Config):
+    def __init__(self, config: Qwen2Config, base_model_prefix: str):
         self.append_attn = config.append_attn
-        super().__init__(config)
+        super().__init__(config, base_model_prefix)
         self.max_seq_len = config.max_seq_len
         self.block_size = config.block_size
 
@@ -1309,13 +1311,15 @@ class Qwen2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, Qwen2Pr
 
     _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
 
-    def __init__(self, config):
+    def __init__(self, config: Qwen2Config, base_model_prefix: str = "qwen2"):
         super().__init__(config)
+        self.base_model_prefix = base_model_prefix
+
         self.max_candidate_len = config.get("speculate_max_candidate_len", 5)
         self.verify_window = config.get("speculate_verify_window", 2)
         self.max_seq_len = config.max_seq_len
 
-        self.qwen2 = Qwen2BlockInferenceModel(config)
+        self.qwen2 = Qwen2BlockInferenceModel(config, base_model_prefix)
         if config.tie_word_embeddings:
             self.lm_head = Qwen2LMHead(config, embedding_weights=self.qwen2.embed_tokens.weight, transpose_y=True)
             self.tie_weights()
@@ -1545,6 +1549,5 @@ class Qwen2VLForConditionalGenerationBlockInferenceModel(Qwen2ForCausalLMBlockIn
     """
 
     # NOTE: (changwenbin) This function corresponds to QWen2-VL's second part, only used for QWen2-VL.
-    def __init__(self, config):
-        super().__init__(config)
-        self.qwen2.base_model_prefix = "model"
+    def __init__(self, config: Qwen2Config):
+        super().__init__(config, base_model_prefix="model")
