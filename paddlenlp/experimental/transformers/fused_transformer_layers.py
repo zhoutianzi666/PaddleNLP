@@ -629,6 +629,7 @@ class FusedMultiTransformerBase(Layer):
             self._add_parameter(ffn_ln_bias)
             self._add_parameter(ffn1_bias)
             self._add_parameter(ffn2_bias)
+            self._add_parameter(e_score_correction_bias)
 
             self._add_parameter(cache_k_scale)
             self._add_parameter(cache_v_scale)

@@ -359,6 +359,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     name=f"fuse{self.base_model_prefix}.{idx}.e_score_correction_bias",
                     initializer=paddle.nn.initializer.Constant(value=0),
                 )
+                if idx >= self.config.first_k_dense_replace
+                else None
                 for idx in range(self.num_layers)
             ]
 
