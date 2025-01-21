@@ -875,6 +875,11 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
             base_actions["layers.0.mlp.shared_experts.gate_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.shared_experts.down_proj.weight"] = partial(fn, is_column=False)
 
+            # MTP parts
+            base_actions["layers.61.embed_tokens.weight"] = partial(fn, is_column=False)
+            base_actions["layers.61.eh_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.61.shared_head.head.weight"] = partial(fn, is_column=True)
+
             for key, action in base_actions.items():
                 if "layers.0." in key:
                     for i in range(num_layers):
