@@ -1876,17 +1876,11 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
             key[..., : self.config.mla_config.qk_nope_head_dim] = key_nope
             key[..., self.config.mla_config.qk_nope_head_dim :] = key_pe
 
-            # query = paddle.nn.functional.pad(query, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
-            # key = paddle.nn.functional.pad(key, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
-            value = paddle.nn.functional.pad(
-                value, [0, self.config.mla_config.qk_head_dim - self.config.mla_config.v_head_dim], value=0
-            )
-
             qkv_out = paddle.concat(
                 [
                     query.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
                     key.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
-                    value.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
+                    value.reshape([-1, self.num_heads * self.config.mla_config.v_head_dim]),
                 ],
                 axis=-1,
             )
