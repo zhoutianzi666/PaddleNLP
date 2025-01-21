@@ -392,28 +392,28 @@ __global__ void append_decode_cache_T_neox_rope_kernel(
     Load<T, VecSize>(&qkv[ori_idx_left], &left_vec);
     Load<T, VecSize>(&qkv[ori_idx_right], &right_vec);
 
-    // if (hi < num_heads + kv_num_heads) {
-    //   // q k rope
-    //   const uint32_t emb_idx = write_seq_id * head_size + h_bias;
-    //   Load<float, VecSize>(&cos_emb[emb_idx], &cos_emb_vec);
-    //   Load<float, VecSize>(&sin_emb[emb_idx], &sin_emb_vec);
-    // }
+    if (hi < num_heads + kv_num_heads) {
+      // q k rope
+      const uint32_t emb_idx = write_seq_id * head_size + h_bias;
+      Load<float, VecSize>(&cos_emb[emb_idx], &cos_emb_vec);
+      Load<float, VecSize>(&sin_emb[emb_idx], &sin_emb_vec);
+    }
 #pragma unroll
     for (int i = 0; i < VecSize; i++) {
       // rope
       float input_left = static_cast<float>(left_vec[i]);
       float input_right = static_cast<float>(right_vec[i]);
-      // if (hi < num_heads + kv_num_heads) {
-      //   const float cos_tmp = cos_emb_vec[i];
-      //   const float sin_tmp = sin_emb_vec[i];
-      //   left_bias_vec[i] =
-      //       static_cast<T>(input_left * cos_tmp - input_right * sin_tmp);
-      //   right_bias_vec[i] =
-      //       static_cast<T>(input_right * cos_tmp + input_left * sin_tmp);
-      // } else {
-      left_bias_vec[i] = static_cast<T>(input_left);
-      right_bias_vec[i] = static_cast<T>(input_right);
-      // }
+      if (hi < num_heads + kv_num_heads) {
+        const float cos_tmp = cos_emb_vec[i];
+        const float sin_tmp = sin_emb_vec[i];
+        left_bias_vec[i] =
+            static_cast<T>(input_left * cos_tmp - input_right * sin_tmp);
+        right_bias_vec[i] =
+            static_cast<T>(input_right * cos_tmp + input_left * sin_tmp);
+      } else {
+        left_bias_vec[i] = static_cast<T>(input_left);
+        right_bias_vec[i] = static_cast<T>(input_right);
+      }
     }
     if (hi < num_heads) {
       // write q
