@@ -1300,20 +1300,21 @@ class FusedMultiTransformerBase(Layer):
         return ffn2_out
 
     def pre_process(self, **kwargs):
-        seq_lens_this_time = kwargs.get("seq_lens_this_time", None)
-        bsz = seq_lens_this_time.shape[0]
-        position_ids = []
-        for i in range(bsz):
-            cur_seq_len = kwargs.get("seq_lens_encoder", None)[i]
-            if cur_seq_len > 0:
-                for j in range(cur_seq_len):
-                    position_ids.append(j)
-            else:
-                ids = kwargs.get("seq_lens_decoder", None)[i].item()
-                if ids > 0:
-                    position_ids.append(ids)
+        if self.config.mla_config.use_mla():
+            seq_lens_this_time = kwargs.get("seq_lens_this_time", None)
+            bsz = seq_lens_this_time.shape[0]
+            position_ids = []
+            for i in range(bsz):
+                cur_seq_len = kwargs.get("seq_lens_encoder", None)[i]
+                if cur_seq_len > 0:
+                    for j in range(cur_seq_len):
+                        position_ids.append(j)
+                else:
+                    ids = kwargs.get("seq_lens_decoder", None)[i].item()
+                    if ids > 0:
+                        position_ids.append(ids)
 
-        self.position_ids = position_ids
+            self.position_ids = position_ids
 
     def post_process(self, **kwargs):
         time_step = kwargs.get("time_step", None)
