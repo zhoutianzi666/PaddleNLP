@@ -669,28 +669,34 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ffn2_weights = []
                 ffn1_scales = []
                 ffn2_scales = []
+
                 for expert_idx in range(self.n_routed_experts):
-                    up_weight = paddle.to_tensor(
-                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"]
-                    ).cast(dtype)
-                    gate_weight = paddle.to_tensor(
-                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"]
-                    ).cast(dtype)
-                    down_weight = paddle.to_tensor(
+                    concated_gate_up_weight = np.concatenate(
+                        [
+                            state_dict[
+                                f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"
+                            ],
+                            state_dict[
+                                f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"
+                            ],
+                        ],
+                        axis=-1,
+                    )
+                    ffn1_weight = paddle.to_tensor(concated_gate_up_weight).cast(dtype)
+                    ffn2_weight = paddle.to_tensor(
                         state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.down_proj.weight"]
                     ).cast(dtype)
 
                     if self.use_weight_only:
-                        ffn1_weight = paddle.concat(x=[gate_weight, up_weight], axis=-1)
                         ffn1_quanted_weight, ffn1_weight_scale = weight_quantize(ffn1_weight, algo=self.quant_algo)
-                        ffn2_quanted_weight, ffn2_weight_scale = weight_quantize(down_weight, algo=self.quant_algo)
+                        ffn2_quanted_weight, ffn2_weight_scale = weight_quantize(ffn2_weight, algo=self.quant_algo)
                         ffn1_weights.append(ffn1_quanted_weight.reshape([self.transformer_block.config.embed_dim, -1]))
                         ffn2_weights.append(ffn2_quanted_weight.reshape([-1, self.transformer_block.config.embed_dim]))
                         ffn1_scales.append(ffn1_weight_scale)
                         ffn2_scales.append(ffn2_weight_scale)
                     else:
-                        ffn1_weights.append(paddle.concat(x=[gate_weight, up_weight], axis=-1))
-                        ffn2_weights.append(down_weight)
+                        ffn1_weights.append(ffn1_weight)
+                        ffn2_weights.append(ffn2_weight)
 
                 fused_moe_ffn1_weight = paddle.to_tensor(ffn1_weights)
                 fused_moe_ffn2_weight = paddle.to_tensor(ffn2_weights)
@@ -714,15 +720,14 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.ffn1_weights_scale[idx].set_value(fused_moe_ffn1_weight_scale)
                     self.transformer_block.ffn2_weights_scale[idx].set_value(fused_moe_ffn2_weight_scale)
 
-                shared_expert_ffn1gate_weight = paddle.to_tensor(
-                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.gate_proj.weight"]
-                ).cast(dtype)
-                shared_expert_ffn1up_weight = paddle.to_tensor(
-                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.up_proj.weight"]
-                ).cast(dtype)
-                shared_expert_ffn1_weight = paddle.concat(
-                    x=[shared_expert_ffn1gate_weight, shared_expert_ffn1up_weight], axis=-1
+                concated_gate_up_weight = np.concatenate(
+                    [
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.gate_proj.weight"],
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.up_proj.weight"],
+                    ],
+                    axis=-1,
                 )
+                shared_expert_ffn1_weight = paddle.to_tensor(concated_gate_up_weight).cast(dtype)
                 shared_expert_ffn2_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.down_proj.weight"]
                 ).cast(dtype)
