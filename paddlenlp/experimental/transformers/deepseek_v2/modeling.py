@@ -555,7 +555,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ).cast(dtype)
                 q_a_layernorm_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_layernorm.weight"]
-                ).cast(dtype)
+                ).cast(self.transformer_block.q_a_layernorm_weights[idx].dtype)
                 q_b_proj_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight"]
                 ).cast(dtype)
@@ -594,7 +594,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             ).cast(dtype)
             kv_a_layernorm_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_layernorm.weight"]
-            ).cast(dtype)
+            ).cast(self.transformer_block.kv_a_layernorm_weights[idx].dtype)
             kv_b_proj_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"]
             ).cast(dtype)

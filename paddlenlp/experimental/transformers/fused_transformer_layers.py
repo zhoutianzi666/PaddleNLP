@@ -682,7 +682,7 @@ class FusedMultiTransformerBase(Layer):
                     q_a_layernorm_weight = self.create_parameter(
                         shape=[self.config.mla_config.q_lora_rank],
                         attr=q_a_layernorm_weight_attr,
-                        dtype=self._dtype,
+                        dtype=self._norm_weight_dtype,
                         is_bias=False,
                     )
                     q_b_proj_weight = self.create_parameter(
@@ -707,7 +707,7 @@ class FusedMultiTransformerBase(Layer):
                 kv_a_layernorm_weight = self.create_parameter(
                     shape=[self.config.mla_config.kv_lora_rank],
                     attr=kv_a_layernorm_weight_attr,
-                    dtype=self._dtype,
+                    dtype=self._norm_weight_dtype,
                     is_bias=False,
                 )
                 kv_b_proj_weight = self.create_parameter(
