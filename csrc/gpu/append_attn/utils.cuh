@@ -25,6 +25,7 @@ struct AppendAttnMetaData {
   int kv_num_heads;
   int token_nums;
   int head_dims;
+  int head_dims_v;
   int max_blocks_per_seq;
 };
 
