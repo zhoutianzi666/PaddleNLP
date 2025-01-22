@@ -1227,10 +1227,6 @@ class FusedMultiTransformerBase(Layer):
                 self.quant_type if hasattr(self, "quant_type") else "None",
             )
 
-            # ffn1_biases要拆分tp的各个卡上，或者只在0卡上，省略此处reduce，减少一次reduce
-            if self.nranks > 1:
-                dist.all_reduce(ffn_out)
-
             fused_moe_out = moe_reduce(
                 ffn_out,
                 expert_scales_float,
