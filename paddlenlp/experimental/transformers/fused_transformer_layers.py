@@ -1298,35 +1298,14 @@ class FusedMultiTransformerBase(Layer):
 
     def pre_process(self, **kwargs):
         if self.config.mla_config.use_mla():
-            seq_lens_encoder = kwargs.get("seq_lens_encoder", None).cast("int64")
-            seq_lens_decoder = kwargs.get("seq_lens_decoder", None).cast("int64")
-            bsz = seq_lens_encoder.shape[0]
+            seq_lens_encoder = kwargs.get("seq_lens_encoder", None)
+            seq_lens_decoder = kwargs.get("seq_lens_decoder", None)
+            position_ids_shape = paddle.sum(seq_lens_encoder) + paddle.sum(seq_lens_decoder > 0)
+            self.position_ids = paddle.zeros(shape=position_ids_shape, dtype=seq_lens_encoder.dtype)
 
-            # 处理 Encoder 部分
-            max_len_encoder = seq_lens_encoder.max().item()
-            encoder_ids = paddle.arange(max_len_encoder).tile([bsz, 1])  # 每个批次生成完整索引
-            encoder_mask = paddle.arange(max_len_encoder).unsqueeze(0) < seq_lens_encoder  # 根据 encoder 长度生成掩码
-            encoder_ids = paddle.masked_select(encoder_ids, encoder_mask)  # 筛选有效的 Encoder 索引
+            from paddlenlp_ops import get_position_ids
 
-            # 生成批次索引用于保持顺序
-            encoder_batch_indices = paddle.repeat_interleave(
-                paddle.arange(bsz), seq_lens_encoder.squeeze(-1)
-            )  # 每个样本的索引重复对应的长度
-
-            # 处理 Decoder 部分
-            decoder_mask = seq_lens_decoder > 0  # 筛选非零 decoder 长度
-            decoder_ids = paddle.masked_select(seq_lens_decoder, decoder_mask)  # 提取非零 decoder 索引
-            decoder_batch_indices = paddle.masked_select(paddle.arange(bsz), decoder_mask.squeeze(-1))  # 提取有效的批次索引
-
-            # 合并 Encoder 和 Decoder
-            all_ids = paddle.concat([encoder_ids, decoder_ids])
-            all_batch_indices = paddle.concat([encoder_batch_indices, decoder_batch_indices])
-
-            # 根据批次索引排序，保证批次顺序
-            sorted_indices = paddle.argsort(all_batch_indices)
-            position_ids = paddle.gather(all_ids, sorted_indices)
-
-            self.position_ids = position_ids
+            get_position_ids(seq_lens_encoder, seq_lens_decoder, self.position_ids)
 
     def post_process(self, **kwargs):
         time_step = kwargs.get("time_step", None)
