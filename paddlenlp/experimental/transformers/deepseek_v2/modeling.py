@@ -60,7 +60,7 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
 
     def __init__(
         self,
-        head_size: int,
+        # head_size: int,
         rotary_dim: int,
         max_position_embeddings: int,
         base: int,
@@ -76,7 +76,6 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         super().__init__()
         self._dtype = paddle.get_default_dtype()
 
-        self.head_size = head_size
         self.rotary_dim = rotary_dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
@@ -93,7 +92,10 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
             * attn_factor
         )
 
-        self.cos_sin_cache = self._compute_cos_sin_cache()
+        cache = self._compute_cos_sin_cache()
+
+        self.cos_sin_cache: paddle.Tensor
+        self.register_buffer("cos_sin_cache", cache, persistable=True)
 
     def _compute_inv_freq(self, scaling_factor: float) -> paddle.Tensor:
         pos_freqs = self.base ** (paddle.arange(0, self.rotary_dim, 2, dtype=paddle.float32) / self.rotary_dim)
@@ -117,7 +119,7 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         cos = emb.cos() * self.mscale
         sin = emb.sin() * self.mscale
         cache = paddle.concat((cos, sin), axis=-1)
-        return cache
+        return cache.cast(self._dtype)
 
     def forward(
         self,
@@ -125,19 +127,14 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
         cos_sin = self.cos_sin_cache[position_ids].unsqueeze(1)
         cos, sin = cos_sin.chunk(2, axis=-1)
 
-        s, h, d = query_rot.shape
-        query_rot = query_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d]).cast("float32")
+        s, h, d = query.shape
+        query = query.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
-        s, h, d = key_rot.shape
-        key_rot = key_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d]).cast("float32")
+        s, h, d = key.shape
+        key = key.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
 
         def rotate_half(x):
             """Rotates half the hidden axiss of the input."""
@@ -145,17 +142,10 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
             x2 = x[..., x.shape[-1] // 2 :]
             return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
 
-        query_rot = (query_rot * cos) + (rotate_half(query_rot) * sin)
-        key_rot = (key_rot * cos) + (rotate_half(key_rot) * sin)
+        query = (query * cos) + (rotate_half(query) * sin)
+        key = (key * cos) + (rotate_half(key) * sin)
 
-        if self.rotary_dim < self.head_size:
-            query = paddle.concat((query_rot, query_pass), axis=-1)
-            key = paddle.concat((key_rot, key_pass), axis=-1)
-        else:
-            query = query_rot
-            key = key_rot
-
-        return query.cast(self._dtype), key.cast(self._dtype)
+        return query, key
 
 
 class DeepseekV2RMSNorm(nn.Layer):
@@ -241,7 +231,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             if k in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim")
         }
         self.rotary_emb = DeepseekScalingRotaryEmbedding(
-            config.qk_rope_head_dim,
             config.qk_rope_head_dim,
             original_max_position,
             config.rope_theta,
