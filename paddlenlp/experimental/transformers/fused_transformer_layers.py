@@ -974,13 +974,13 @@ class FusedMultiTransformerBase(Layer):
                 query = paddle.matmul(ln_out, self.q_proj_weights[i])
 
             query = query.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
-            query_nope, query_pe = paddle.split(
-                query, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.qk_rope_head_dim], axis=-1
+            query_nope, query_pe = query.split(
+                [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.qk_rope_head_dim], axis=-1
             )
 
             compressed_kv = paddle.matmul(ln_out, self.kv_a_proj_with_mqa_weights[i])
-            compressed_kv, key_pe = paddle.split(
-                compressed_kv, [self.config.mla_config.kv_lora_rank, self.config.mla_config.qk_rope_head_dim], axis=-1
+            compressed_kv, key_pe = compressed_kv.split(
+                [self.config.mla_config.kv_lora_rank, self.config.mla_config.qk_rope_head_dim], axis=-1
             )
             key_pe = key_pe.reshape([-1, 1, self.config.mla_config.qk_rope_head_dim])
             compressed_kv = self.norm_func(
@@ -994,8 +994,8 @@ class FusedMultiTransformerBase(Layer):
             key_value = key_value.reshape(
                 [-1, self.num_heads, self.config.mla_config.qk_nope_head_dim + self.config.mla_config.v_head_dim]
             )
-            key_nope, value = paddle.split(
-                key_value, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
+            key_nope, value = key_value.split(
+                [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
             )
 
             query_pe, key_pe = self.config.rotary_emb(self.position_ids, query_pe, key_pe)
@@ -1305,6 +1305,7 @@ class FusedMultiTransformerBase(Layer):
 
             from paddlenlp_ops import get_position_ids
 
+            # In-place operations that compute the position_ids.
             get_position_ids(seq_lens_encoder, seq_lens_decoder, self.position_ids)
 
     def post_process(self, **kwargs):
@@ -1827,8 +1828,8 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
                 )
 
             query = query.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
-            query_nope, query_pe = paddle.split(
-                query, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.qk_rope_head_dim], axis=-1
+            query_nope, query_pe = query.split(
+                [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.qk_rope_head_dim], axis=-1
             )
 
             compressed_kv = weight_only_linear(
@@ -1837,8 +1838,8 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
                 weight_scale=self.kv_a_proj_with_mqa_weights_scale[i],
                 weight_dtype=self.weight_dtype,
             )
-            compressed_kv, key_pe = paddle.split(
-                compressed_kv, [self.config.mla_config.kv_lora_rank, self.config.mla_config.qk_rope_head_dim], axis=-1
+            compressed_kv, key_pe = compressed_kv.split(
+                [self.config.mla_config.kv_lora_rank, self.config.mla_config.qk_rope_head_dim], axis=-1
             )
             key_pe = key_pe.reshape([-1, 1, self.config.mla_config.qk_rope_head_dim])
             compressed_kv = self.norm_func(
@@ -1857,8 +1858,8 @@ class FusedMultiTransformerWeightOnly(FusedMultiTransformerBase):
             key_value = key_value.reshape(
                 [-1, self.num_heads, self.config.mla_config.qk_nope_head_dim + self.config.mla_config.v_head_dim]
             )
-            key_nope, value = paddle.split(
-                key_value, [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
+            key_nope, value = key_value.split(
+                [self.config.mla_config.qk_nope_head_dim, self.config.mla_config.v_head_dim], axis=-1
             )
 
             query_pe, key_pe = self.config.rotary_emb(self.position_ids, query_pe, key_pe)

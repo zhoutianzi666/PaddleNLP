@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 from functools import partial
 from typing import Tuple
 
@@ -60,7 +61,6 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
 
     def __init__(
         self,
-        # head_size: int,
         rotary_dim: int,
         max_position_embeddings: int,
         base: int,
@@ -114,10 +114,9 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
     def _compute_cos_sin_cache(self) -> paddle.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = paddle.arange(self.max_position_embeddings * self.scaling_factor, dtype=paddle.float32)
-        freqs = paddle.einsum("i,j -> ij", t, inv_freq)
-        emb = paddle.concat((freqs, freqs), axis=-1)
-        cos = emb.cos() * self.mscale
-        sin = emb.sin() * self.mscale
+        freqs = paddle.einsum("i,j->ij", t, inv_freq)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
         cache = paddle.concat((cos, sin), axis=-1)
         return cache.cast(self._dtype)
 
@@ -127,29 +126,17 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        cos_sin = self.cos_sin_cache[position_ids].unsqueeze(1)
-        cos, sin = cos_sin.chunk(2, axis=-1)
+        from paddlenlp_ops import fused_rotary_position_encoding
 
-        s, h, d = query.shape
-        query = query.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
-
-        s, h, d = key.shape
-        key = key.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
-
-        def rotate_half(x):
-            """Rotates half the hidden axiss of the input."""
-            x1 = x[..., : x.shape[-1] // 2]
-            x2 = x[..., x.shape[-1] // 2 :]
-            return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
-
-        query = (query * cos) + (rotate_half(query) * sin)
-        key = (key * cos) + (rotate_half(key) * sin)
+        # In-place operations that update the query and key tensors.
+        os.environ["stride_in_no_check_dy2st_diff"] = "1"
+        fused_rotary_position_encoding(query, key, position_ids, self.cos_sin_cache, self.rotary_dim, False)
 
         return query, key
 
 
 class DeepseekV2RMSNorm(nn.Layer):
-    def __init__(self, config):
+    def __init__(self, config: DeepseekV2Config):
         super().__init__()
         self.eps = config.rms_norm_eps
         self.weight = paddle.create_parameter(
@@ -170,9 +157,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         self.config = config
 
-        self.append_attn = config.append_attn
         self.max_seq_len = config.max_seq_len
-        self.block_size = config.block_size
 
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
@@ -181,11 +166,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_layers = config.num_hidden_layers
         self.rms_norm_eps = config.rms_norm_eps
-        self.max_position_embeddings = config.max_position_embeddings
         self.quant_type = config.quant_type
         self.rope_theta = config.rope_theta
-
-        self.use_neox = False
 
         self.use_weight_only = False
         if config.quant_type == "weight_only_int8":
@@ -499,7 +481,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             rope_theta=self.rope_theta,
             rotary_emb=self.rotary_emb,
             norm_type="rmsnorm",
-            use_neox_rotary_style=self.use_neox,
             rank_id=config.tensor_parallel_rank,
             moe_config=moe_config,
             mla_config=mla_config,
