@@ -26,7 +26,7 @@ reduce_group= paddle.distributed.new_group([0, 4])
 
 dtype = "bfloat16"
 hidden_size = 2048
-moe_intermediate_size = 2048
+moe_intermediate_size = 2816
 expert_num = 120
 top_k = 4
 
@@ -164,10 +164,12 @@ def compute_ep_moe(tmp_out):
 
     return fused_moe_out
 
-tmp_out = paddle.randn([82, hidden_size], dtype)
 
-for i in range(10):
-    res = compute_ep_moe(tmp_out)
-print(res)
+if __name__ == '__main__':
+    tmp_out = paddle.randn([82, hidden_size], dtype)
+
+    for i in range(10):
+        res = compute_ep_moe(tmp_out)
+    print(res)
 
 
