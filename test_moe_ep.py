@@ -32,7 +32,7 @@ top_k = 4
 
 experts_num_per_gpu = expert_num // total_cards
 
-
+# 所有的卡的gate_weights是相同的！
 gate_weights = paddle.randn([hidden_size, expert_num])
 dist.broadcast(gate_weights, src=0)
 
