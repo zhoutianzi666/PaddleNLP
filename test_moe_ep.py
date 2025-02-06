@@ -57,7 +57,6 @@ def compute_ep_moe(tmp_out):
 
     gate_out = paddle.matmul(tmp_out.cast("float32"), gate_weights)
 
-    # topk在moe_dispatch中
     (
         permute_input,
         token_nums_per_expert,
@@ -100,7 +99,6 @@ def compute_ep_moe(tmp_out):
   
     
     # 这两个代码就是为了让所有的卡共享token_nums_per_expert
-
     dist.all_reduce(token_nums_per_expert, group=reduce_group)
     dist.broadcast(token_nums_per_expert, src=0)
 
@@ -151,10 +149,10 @@ def compute_ep_moe(tmp_out):
 
     ffn_out = run_permute_input(ffn_out, False)
     dist.alltoall_single(permute_input, ffn_out, out_split_sizes_to_permute_input, in_split_sizes_to_permute_input)
-    noise_pred = paddle.assign(permute_input)
+    moe_reduce_input = paddle.assign(permute_input)
 
     fused_moe_out = moe_reduce(
-        noise_pred,
+        moe_reduce_input,
         expert_scales_float,
         permute_indices_per_token,
         top_k_indices,
