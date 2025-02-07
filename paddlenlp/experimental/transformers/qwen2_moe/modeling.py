@@ -78,7 +78,6 @@ class Qwen2MoeInferenceModel(Qwen2MoePretrainedModel):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_layers = config.num_hidden_layers
         self.rms_norm_eps = config.rms_norm_eps
-        self.max_position_embeddings = config.max_position_embeddings
         self.quant_type = config.quant_type
         self.rope_theta = config.rope_theta
 

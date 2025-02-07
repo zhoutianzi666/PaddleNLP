@@ -773,7 +773,9 @@ class Qwen2InferenceModel(Qwen2PretrainedModel):
                     ffn1_weight.cast(self.transformer_block.ffn1_weights[idx].dtype)
                 )
 
-            ffn2_weight = paddle.to_tensor(state_dict[f"{model_prefix}.mlp.down_proj.weight"]).cast(paddle.get_default_dtype())
+            ffn2_weight = paddle.to_tensor(state_dict[f"{model_prefix}.mlp.down_proj.weight"]).cast(
+                paddle.get_default_dtype()
+            )
             if self.use_weight_only:
                 ffn2_quanted_weight, ffn2_weight_scale = weight_quantize(ffn2_weight, algo=self.quant_algo)
                 self.transformer_block.ffn2_weights[idx].set_value(ffn2_quanted_weight)

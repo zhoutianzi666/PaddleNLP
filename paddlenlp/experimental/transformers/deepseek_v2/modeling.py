@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 from functools import partial
 from typing import Tuple
 
@@ -60,7 +61,6 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
 
     def __init__(
         self,
-        head_size: int,
         rotary_dim: int,
         max_position_embeddings: int,
         base: int,
@@ -74,7 +74,8 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         mscale_all_dim: float = 0,
     ) -> None:
         super().__init__()
-        self.head_size = head_size
+        self._dtype = paddle.get_default_dtype()
+
         self.rotary_dim = rotary_dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
@@ -94,7 +95,7 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         cache = self._compute_cos_sin_cache()
 
         self.cos_sin_cache: paddle.Tensor
-        self.register_buffer("cos_sin_cache", cache, persistable=False)
+        self.register_buffer("cos_sin_cache", cache, persistable=True)
 
     def _compute_inv_freq(self, scaling_factor: float) -> paddle.Tensor:
         pos_freqs = self.base ** (paddle.arange(0, self.rotary_dim, 2, dtype=paddle.float32) / self.rotary_dim)
@@ -113,12 +114,11 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
     def _compute_cos_sin_cache(self) -> paddle.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = paddle.arange(self.max_position_embeddings * self.scaling_factor, dtype=paddle.float32)
-        freqs = paddle.einsum("i,j -> ij", t, inv_freq)
-        emb = paddle.concat((freqs, freqs), axis=-1)
-        cos = emb.cos() * self.mscale
-        sin = emb.sin() * self.mscale
+        freqs = paddle.einsum("i,j->ij", t, inv_freq)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
         cache = paddle.concat((cos, sin), axis=-1)
-        return cache
+        return cache.cast(self._dtype)
 
     def forward(
         self,
@@ -126,40 +126,17 @@ class DeepseekScalingRotaryEmbedding(nn.Layer):
         query: paddle.Tensor,
         key: paddle.Tensor,
     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
-        cos_sin = self.cos_sin_cache[position_ids].unsqueeze(1)
-        cos, sin = cos_sin.chunk(2, axis=-1)
+        from paddlenlp_ops import fused_rotary_position_encoding
 
-        s, h, d = query_rot.shape
-        query_rot = query_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
+        # In-place operations that update the query and key tensors.
+        os.environ["stride_in_no_check_dy2st_diff"] = "1"
+        fused_rotary_position_encoding(query, key, position_ids, self.cos_sin_cache, self.rotary_dim, False)
 
-        s, h, d = key_rot.shape
-        key_rot = key_rot.reshape([s, h, d // 2, 2]).transpose([0, 1, 3, 2]).reshape([s, h, d])
-
-        def rotate_half(x):
-            """Rotates half the hidden axiss of the input."""
-            x1 = x[..., : x.shape[-1] // 2]
-            x2 = x[..., x.shape[-1] // 2 :]
-            return paddle.concat([-x2, x1], axis=-1)  # shape is the same as x
-
-        query_rot = (query_rot * cos) + (rotate_half(query_rot) * sin)
-        key_rot = (key_rot * cos) + (rotate_half(key_rot) * sin)
-
-        if self.rotary_dim < self.head_size:
-            query = paddle.concat((query_rot, query_pass), axis=-1)
-            key = paddle.concat((key_rot, key_pass), axis=-1)
-        else:
-            query = query_rot
-            key = key_rot
         return query, key
 
 
 class DeepseekV2RMSNorm(nn.Layer):
-    def __init__(self, config):
+    def __init__(self, config: DeepseekV2Config):
         super().__init__()
         self.eps = config.rms_norm_eps
         self.weight = paddle.create_parameter(
@@ -180,9 +157,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
         self.config = config
 
-        self.append_attn = config.append_attn
         self.max_seq_len = config.max_seq_len
-        self.block_size = config.block_size
 
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
@@ -191,11 +166,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_layers = config.num_hidden_layers
         self.rms_norm_eps = config.rms_norm_eps
-        self.max_position_embeddings = config.max_position_embeddings
         self.quant_type = config.quant_type
         self.rope_theta = config.rope_theta
-
-        self.use_neox = False
 
         self.use_weight_only = False
         if config.quant_type == "weight_only_int8":
@@ -241,7 +213,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             if k in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim")
         }
         self.rotary_emb = DeepseekScalingRotaryEmbedding(
-            config.qk_rope_head_dim,
             config.qk_rope_head_dim,
             original_max_position,
             config.rope_theta,
@@ -510,7 +481,6 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             rope_theta=self.rope_theta,
             rotary_emb=self.rotary_emb,
             norm_type="rmsnorm",
-            use_neox_rotary_style=self.use_neox,
             rank_id=config.tensor_parallel_rank,
             moe_config=moe_config,
             mla_config=mla_config,
@@ -555,7 +525,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ).cast(dtype)
                 q_a_layernorm_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_a_layernorm.weight"]
-                ).cast(dtype)
+                ).cast(self.transformer_block.q_a_layernorm_weights[idx].dtype)
                 q_b_proj_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight"]
                 ).cast(dtype)
@@ -594,7 +564,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
             ).cast(dtype)
             kv_a_layernorm_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_a_layernorm.weight"]
-            ).cast(dtype)
+            ).cast(self.transformer_block.kv_a_layernorm_weights[idx].dtype)
             kv_b_proj_weight = paddle.to_tensor(
                 state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"]
             ).cast(dtype)
@@ -669,28 +639,34 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ffn2_weights = []
                 ffn1_scales = []
                 ffn2_scales = []
+
                 for expert_idx in range(self.n_routed_experts):
-                    up_weight = paddle.to_tensor(
-                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"]
-                    ).cast(dtype)
-                    gate_weight = paddle.to_tensor(
-                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"]
-                    ).cast(dtype)
-                    down_weight = paddle.to_tensor(
+                    concated_gate_up_weight = np.concatenate(
+                        [
+                            state_dict[
+                                f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"
+                            ],
+                            state_dict[
+                                f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"
+                            ],
+                        ],
+                        axis=-1,
+                    )
+                    ffn1_weight = paddle.to_tensor(concated_gate_up_weight).cast(dtype)
+                    ffn2_weight = paddle.to_tensor(
                         state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.down_proj.weight"]
                     ).cast(dtype)
 
                     if self.use_weight_only:
-                        ffn1_weight = paddle.concat(x=[gate_weight, up_weight], axis=-1)
                         ffn1_quanted_weight, ffn1_weight_scale = weight_quantize(ffn1_weight, algo=self.quant_algo)
-                        ffn2_quanted_weight, ffn2_weight_scale = weight_quantize(down_weight, algo=self.quant_algo)
+                        ffn2_quanted_weight, ffn2_weight_scale = weight_quantize(ffn2_weight, algo=self.quant_algo)
                         ffn1_weights.append(ffn1_quanted_weight.reshape([self.transformer_block.config.embed_dim, -1]))
                         ffn2_weights.append(ffn2_quanted_weight.reshape([-1, self.transformer_block.config.embed_dim]))
                         ffn1_scales.append(ffn1_weight_scale)
                         ffn2_scales.append(ffn2_weight_scale)
                     else:
-                        ffn1_weights.append(paddle.concat(x=[gate_weight, up_weight], axis=-1))
-                        ffn2_weights.append(down_weight)
+                        ffn1_weights.append(ffn1_weight)
+                        ffn2_weights.append(ffn2_weight)
 
                 fused_moe_ffn1_weight = paddle.to_tensor(ffn1_weights)
                 fused_moe_ffn2_weight = paddle.to_tensor(ffn2_weights)
@@ -714,15 +690,14 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.ffn1_weights_scale[idx].set_value(fused_moe_ffn1_weight_scale)
                     self.transformer_block.ffn2_weights_scale[idx].set_value(fused_moe_ffn2_weight_scale)
 
-                shared_expert_ffn1gate_weight = paddle.to_tensor(
-                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.gate_proj.weight"]
-                ).cast(dtype)
-                shared_expert_ffn1up_weight = paddle.to_tensor(
-                    state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.up_proj.weight"]
-                ).cast(dtype)
-                shared_expert_ffn1_weight = paddle.concat(
-                    x=[shared_expert_ffn1gate_weight, shared_expert_ffn1up_weight], axis=-1
+                concated_gate_up_weight = np.concatenate(
+                    [
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.gate_proj.weight"],
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.up_proj.weight"],
+                    ],
+                    axis=-1,
                 )
+                shared_expert_ffn1_weight = paddle.to_tensor(concated_gate_up_weight).cast(dtype)
                 shared_expert_ffn2_weight = paddle.to_tensor(
                     state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.shared_experts.down_proj.weight"]
                 ).cast(dtype)
