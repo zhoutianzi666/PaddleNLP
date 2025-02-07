@@ -289,6 +289,7 @@ class MixtralInferenceModel(MixtralPretrainedModel):
             top_k=self.moe_topk,
             norm_topk_prob=True,
             moe_every2=self.moe_every2,
+            moe_intermediate_size=self.intermediate_size,
         )
 
         transformer_config = FusedMultiTransformerConfig(
