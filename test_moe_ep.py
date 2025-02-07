@@ -175,16 +175,7 @@ def compute_ep_moe(tmp_out):
     tmp_out1 = swiglu(tmp_out1)
     ffn_out = paddle.matmul(tmp_out1, one_ffn2_weights)
 
-    # ffn_out = moe_ffn(
-    #     permute_input_per_card,
-    #     this_card_token_nums,
-    #     ffn1_weights,
-    #     ffn2_weights,
-    #     ffn1_biases,
-    #     ffn1_weights_scale,
-    #     ffn2_weights_scale,
-    #     quant_type,
-    # )
+    # ffn_out = moe_ffn(permute_input_per_card, this_card_token_nums, ffn1_weights, ffn2_weights, ffn1_biases, ffn1_weights_scale, ffn2_weights_scale, quant_type)
     
     end_event.record()
     elapsed_time_ms = start_event.elapsed_time(end_event)
