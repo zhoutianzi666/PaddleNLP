@@ -150,11 +150,12 @@ def compute_ep_moe(tmp_out):
         return y
     
     start_event.record()
-    act_in_split_size = paddle.zeros([total_cards], token_nums_per_expert.dtype)
     
     if IsFirstGPUInAttentionTP:
         act_in_split_size = get_adjacent_minus(token_nums_per_expert)
+        permute_input = permute_input
     else:
+        act_in_split_size = paddle.zeros([total_cards], token_nums_per_expert.dtype)
         permute_input = paddle.empty([0, hidden_size], dtype=dtype)
     
     act_out_split_size = paddle.empty_like(act_in_split_size)
@@ -163,7 +164,8 @@ def compute_ep_moe(tmp_out):
     this_card_token_nums = act_out_split_size.sum().reshape([1])
 
     permute_input_per_card = paddle.empty([this_card_token_nums, hidden_size], dtype=dtype)
-    dist.alltoall_single(permute_input_per_card, permute_input, act_in_split_size, act_out_split_size)
+    t0 = dist.alltoall_single(permute_input_per_card, permute_input, act_in_split_size, act_out_split_size, sync_op=False)
+    t0.wait()
 
     end_event.record()
     elapsed_time_ms = start_event.elapsed_time(end_event)
