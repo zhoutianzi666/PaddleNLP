@@ -10,22 +10,21 @@ from paddle.incubate.nn.functional import (
     swiglu,
 )
 
-total_cards = 8
-
+total_cards = 16
+attention_tp = 1
 
 strategy = fleet.DistributedStrategy()
-strategy.hybrid_configs = {"dp_degree": 1, "mp_degree": total_cards, "pp_degree": 1}
+strategy.hybrid_configs = {"dp_degree": total_cards // attention_tp, "mp_degree": attention_tp, "pp_degree": 1}
 fleet.init(is_collective=True, strategy=strategy)
 
 hcg = fleet.get_hybrid_communicate_group()
-mp_id = hcg.get_model_parallel_rank()
 
-attention_tp = 2
+mp_group = hcg.get_model_parallel_group()
 
 dtype = "bfloat16"
 hidden_size = 8192
 moe_intermediate_size = 3584
-experts_num = 8
+experts_num = total_cards
 top_k = 8
 
 experts_num_per_gpu = experts_num // total_cards
@@ -49,16 +48,16 @@ one_ffn2_weights = ffn2_weights[0]
 
 
 group_num = total_cards // attention_tp
-group_id = mp_id // attention_tp
+group_id = paddle.distributed.get_rank() // attention_tp
 first_mp_id_in_group = group_id * attention_tp
-IsFirstGPUInAttentionTP = mp_id == first_mp_id_in_group
+IsFirstGPUInAttentionTP = paddle.distributed.get_rank() == first_mp_id_in_group
 
 def compute_baseline(tmp_out):
     all_tensor = []
-    dist.all_gather(all_tensor, ffn1_weights, group=fleet.get_hybrid_communicate_group().get_model_parallel_group())
+    dist.all_gather(all_tensor, ffn1_weights)
     all_ffn1_weights = paddle.concat(all_tensor, axis=0)
     all_tensor = []
-    dist.all_gather(all_tensor, ffn2_weights, group=fleet.get_hybrid_communicate_group().get_model_parallel_group())
+    dist.all_gather(all_tensor, ffn2_weights)
     all_ffn2_weights = paddle.concat(all_tensor, axis=0)
 
     gate_out = paddle.matmul(tmp_out.cast("float32"), gate_weights)
@@ -159,8 +158,8 @@ def compute_ep_moe(tmp_out):
         permute_input = paddle.empty([0, hidden_size], dtype=dtype)
     
     act_out_split_size = paddle.empty_like(act_in_split_size)
-    
     dist.alltoall(act_out_split_size, act_in_split_size)
+
     this_card_token_nums = act_out_split_size.sum().reshape([1])
 
     permute_input_per_card = paddle.empty([this_card_token_nums, hidden_size], dtype=dtype)
@@ -214,7 +213,7 @@ if __name__ == '__main__':
     for i in range(20):
         flush_cache = paddle.randn([512, 512, 512], dtype)
 
-        tmp_x = paddle.randn([128, hidden_size], dtype)
+        tmp_x = paddle.randn([64, hidden_size], dtype)
         tmp_x = tmp_x * 0.01
         res = compute_ep_moe(tmp_x)
     
@@ -238,15 +237,21 @@ if __name__ == '__main__':
 
 
 # data = paddle.ones([256, hidden_size])
+
+# dist.all_reduce(data, group=mp_group)
+
+# print(data)
+# exit(0)
+
 # all_tensor = []
 # dist.all_gather(all_tensor, data)
 # dist.all_gather(all_tensor, data)
 
-# start.record()
+# start_event.record()
 
 # dist.all_gather(all_tensor, data)
 
-# end.record()
+# end_event.record()
 # elapsed_time_ms = start_event.elapsed_time(end_event)
 # print(f"dist.all_gather: {round(elapsed_time_ms,2)} ms")
 
