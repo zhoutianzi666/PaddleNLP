@@ -1055,9 +1055,11 @@ class Qwen2InferenceModel(Qwen2PretrainedModel):
 
 
 class Qwen2ForCausalLMInferenceModel(GenerationInferenceModel, Qwen2PretrainedModel):
-    def __init__(self, config: Qwen2Config, **kwargs):
-        super(Qwen2ForCausalLMInferenceModel, self).__init__(config)
-        self.qwen2 = Qwen2InferenceModel(config)
+    def __init__(self, config: Qwen2Config, base_model_prefix: str = "qwen2"):
+        super().__init__(config)
+        self.base_model_prefix = base_model_prefix
+
+        self.qwen2 = Qwen2InferenceModel(config, base_model_prefix)
         if config.tie_word_embeddings:
             self.lm_head = Qwen2LMHead(config, embedding_weights=self.qwen2.embed_tokens.weight, transpose_y=True)
             self.tie_weights()
