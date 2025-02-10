@@ -610,7 +610,7 @@ def read_res(model_name_or_path: str, tensor_queue: mp.Queue, result_queue: mp.Q
     from paddlenlp_ops import get_output
 
     while True:
-        get_output(output_tensor, 0, True)
+        get_output(output_tensor, 0, fleet.get_hybrid_communicate_group().get_data_parallel_rank(), True)
         if int(output_tensor[0, 0]) == -2:  # read none
             continue
         bsz = int(output_tensor[1, 0])
@@ -740,6 +740,7 @@ def init_dist_env():
             hcg = fleet.get_hybrid_communicate_group()
 
         tensor_parallel_rank = hcg.get_model_parallel_rank()
+        tensor_parallel_degree = hcg.get_model_parallel_world_size()
     return tensor_parallel_rank, tensor_parallel_degree
 
 

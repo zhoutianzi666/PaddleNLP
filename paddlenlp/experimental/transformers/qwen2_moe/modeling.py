@@ -109,6 +109,7 @@ class Qwen2MoeInferenceModel(Qwen2MoePretrainedModel):
                 self.vocab_size,
                 self.hidden_size,
                 weight_attr=paddle.ParamAttr(initializer=nn.initializer.XavierNormal()),
+                mp_group = fleet.get_hybrid_communicate_group().get_model_parallel_group(),
             )
         else:
             self.embed_tokens = nn.Embedding(

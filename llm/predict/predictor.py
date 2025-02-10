@@ -60,6 +60,7 @@ from paddlenlp.utils.log import logger
 class PredictorArgument:
     model_name_or_path: str = field(default=None, metadata={"help": "The directory of model."})
     model_prefix: str = field(default="model", metadata={"help": "the prefix name of static model"})
+    dp_degree: int = field(default=8, metadata={"help": "The data parallel degree."})
     src_length: int = field(default=1024, metadata={"help": "The max length of source text."})
     min_length: int = field(default=1, metadata={"help": "the min length for decoding."})
     max_length: int = field(default=1024, metadata={"help": "the max length for decoding."})
@@ -1428,11 +1429,14 @@ def predict():
     paddle.set_device(predictor_args.device)
     paddle.set_default_dtype(predictor_args.dtype)
 
-    tensor_parallel_degree = paddle.distributed.get_world_size()
+    world_size = paddle.distributed.get_world_size()
+    dp_degree = predictor_args.dp_degree
+    tensor_parallel_degree = world_size // dp_degree
+    
     if tensor_parallel_degree > 1:
         strategy = fleet.DistributedStrategy()
         strategy.hybrid_configs = {
-            "dp_degree": 1,
+            "dp_degree": dp_degree,
             "mp_degree": tensor_parallel_degree,
             "pp_degree": 1,
             "sharding_degree": 1,
@@ -1460,14 +1464,32 @@ def predict():
                     target_texts.append("")
 
     else:
-        source_texts = ["解释一下温故而知新"] * predictor_args.batch_size
-        target_texts = [""] * predictor_args.batch_size
+        source_texts = ["解释一下温故而知新", 
+                        "你好，你是谁", 
+                        "请问中国的首都是哪里呢？",
+                        "请问法国的首都是哪里呢？",
+                        "请问日本的首都是哪里呢？",
+                        "请问南非的首都是哪里呢？",
+                        "请问英国的首都是哪里呢？",
+                        "小日本为什么叫小日本呢？",
+                        ]
+        target_texts = [""] * len(source_texts)
 
     batch_source_texts = batchfy_text(source_texts, predictor_args.batch_size)
     batch_target_texts = batchfy_text(target_texts, predictor_args.batch_size)
 
+    if predictor_args.dp_degree > 1:
+        hcg = fleet.get_hybrid_communicate_group()
+        dp_degree = hcg.get_data_parallel_world_size()
+        dp_id = hcg.get_data_parallel_rank()
+    else:
+        dp_degree = 1
+        dp_id = 0
+
     with open(model_args.output_file, "w", encoding="utf-8") as f:
         for bs, batch_source_text in enumerate(batch_source_texts):
+            if bs % dp_degree != dp_id:
+                continue
             logger.info("Start predict")
             outputs = predictor.predict(batch_source_text)
             logger.info("End predict")
@@ -1487,6 +1509,11 @@ def predict():
     if predictor_args.benchmark:
         benchmark(predictor, predictor_args, model_args)
 
+    paddle.distributed.barrier()
+    import paddle.distributed as dist
+    data = paddle.to_tensor([1])
+    dist.all_reduce(data)
+    print(data)
 
 def benchmark(predictor, predictor_args, model_args):
     # Just construct a simple benchmark input. We pad input to the src_length.

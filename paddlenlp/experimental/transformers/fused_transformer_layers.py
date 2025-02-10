@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import annotations
+from paddle.distributed import fleet
 
 import os
 from dataclasses import dataclass
@@ -377,6 +378,13 @@ class FusedMultiTransformerBase(Layer):
         self._epsilon = config.epsilon
         self._residual_alpha = config.residual_alpha
         self.nranks = config.nranks
+
+        if self.nranks > 1:
+            dp_degree = fleet.get_hybrid_communicate_group().get_data_parallel_world_size()
+            self.tp_group = None
+            if dp_degree > 1:
+                self.tp_group = fleet.get_hybrid_communicate_group().get_model_parallel_group()
+
         self.norm_type = config.norm_type
         if self.norm_type == "layernorm":
             self.norm_func = fused_layer_norm
@@ -1434,7 +1442,7 @@ class FusedMultiTransformerBase(Layer):
             )
             # all_reduce
             if self.nranks > 1:
-                dist.all_reduce(out_linear_out)
+                dist.all_reduce(out_linear_out, group = self.tp_group)
 
             # ffn layernorm
             tmp_out, residual_input = self.compute_ffn_layernorm(out_linear_out, residual_input, i)
@@ -1457,7 +1465,7 @@ class FusedMultiTransformerBase(Layer):
 
             # all_reduce
             if self.nranks > 1:
-                dist.all_reduce(ffn2_out)
+                dist.all_reduce(ffn2_out, group = self.tp_group)
 
             # norm + residual_add_bias
             tmp_out, residual_input = self.compute_bias_residual_layernorm(
