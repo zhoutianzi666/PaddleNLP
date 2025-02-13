@@ -218,20 +218,27 @@ class BasePredictor:
             self.generation_config = None
 
     def _preprocess(self, source):
+
         if self.tokenizer.chat_template is not None:
-            source = [source] if isinstance(source, str) else source
+            # for str -> List[str] eg. "hello"
+            # for List[str] -> List[str]  eg. ["hello", "hello new"]
+            # for List[List[str]] -> List[List[List[str]]]  eg. 历史对话形式,一轮
+            #             [ [ "Hello, how are you?", "I'm doing great. How can I help you today?"],
+            #                ["I'd like to show off how chat templating works!"], ]
+            # for List[Dict] -> List[List[Dict]]  [{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'nice'}]
+            #                                 ->  [[{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'nice'}]]
+            if not isinstance(source, list) or not isinstance(source[0], str):
+                source = [source]
             source = [self.tokenizer.apply_chat_template(sentence, tokenize=False) for sentence in source]
 
-        return_position_ids = False
         return_attention_mask = False
         if len(source) > 1:
-            return_position_ids = True
             return_attention_mask = True
         tokenized_source = self.tokenizer(
             source,
             max_length=self.config.src_length,
             truncation=True,
-            return_position_ids=True if not isinstance(self.tokenizer, ChatGLMTokenizer) else return_position_ids,
+            return_position_ids=True if not isinstance(self.tokenizer, ChatGLMTokenizer) else False,
             return_attention_mask=return_attention_mask,
             truncation_side="left",
             return_tensors=self.return_tensors,
@@ -487,7 +494,8 @@ class InferencePredictorMixin(BasePredictor):
         pre_caches_length = 0 if not self.config.export_precache else self.pre_caches[0].shape[-2]
 
         if self.tokenizer.chat_template is not None:
-            source = [source] if isinstance(source, str) else source
+            if not isinstance(source, list) or not isinstance(source[0], str):
+                source = [source]
             source = [self.tokenizer.apply_chat_template(sentence, tokenize=False) for sentence in source]
 
         inputs = llm_utils.dybatch_preprocess(
@@ -930,7 +938,8 @@ class BlockInferencePredictorMixin(BasePredictor):
             assert len(input_text) == self.batch_size
 
         if self.tokenizer.chat_template is not None:
-            input_text = [input_text] if isinstance(input_text, str) else input_text
+            if not isinstance(input_text, list) or not isinstance(input_text[0], str):
+                input_text = [input_text]
             input_text = [self.tokenizer.apply_chat_template(sentence, tokenize=False) for sentence in input_text]
 
         input_ids = []
@@ -1342,7 +1351,16 @@ def create_predictor(
     predictor_args: PredictorArgument,
     model_args: ModelArgument,
 ):
-    tokenizer = AutoTokenizer.from_pretrained(predictor_args.model_name_or_path, padding_side="left", use_fast=True)
+
+    paddle.set_device(predictor_args.device)
+    paddle.set_default_dtype(predictor_args.dtype)
+
+    from paddlenlp.utils.env import USE_FAST_TOKENIZER
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        predictor_args.model_name_or_path, padding_side="left", use_fast=USE_FAST_TOKENIZER
+    )
+
     # init chat_template for tokenizer
     llm_utils.init_chat_template(tokenizer, predictor_args.model_name_or_path, predictor_args.chat_template)
 
@@ -1438,7 +1456,7 @@ def predict():
     world_size = paddle.distributed.get_world_size()
     dp_degree = predictor_args.dp_degree
     tensor_parallel_degree = world_size // dp_degree
-    
+
     if tensor_parallel_degree > 1:
         strategy = fleet.DistributedStrategy()
         strategy.hybrid_configs = {
