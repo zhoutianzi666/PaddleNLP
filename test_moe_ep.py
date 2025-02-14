@@ -162,9 +162,11 @@ def compute_ep_moe(tmp_out):
 
     this_card_token_nums = act_out_split_size.sum().reshape([1])
 
+    act_in_split_size = act_in_split_size.numpy().tolist()
+    act_out_split_size = act_out_split_size.numpy().tolist()
+
     permute_input_per_card = paddle.empty([this_card_token_nums, hidden_size], dtype=dtype)
-    t0 = dist.alltoall_single(permute_input_per_card, permute_input, act_in_split_size, act_out_split_size, sync_op=False)
-    t0.wait()
+    dist.alltoall_single(permute_input_per_card, permute_input, act_in_split_size, act_out_split_size)
 
     end_event.record()
     elapsed_time_ms = start_event.elapsed_time(end_event)
@@ -213,7 +215,7 @@ if __name__ == '__main__':
     for i in range(20):
         flush_cache = paddle.randn([512, 512, 512], dtype)
 
-        tmp_x = paddle.randn([64, hidden_size], dtype)
+        tmp_x = paddle.randn([128, hidden_size], dtype)
         tmp_x = tmp_x * 0.01
         res = compute_ep_moe(tmp_x)
     
@@ -222,7 +224,7 @@ if __name__ == '__main__':
     if res.shape[0] > 0:
         print(res.shape)
         print(baseline.shape)
-        print(paddle.max(paddle.abs(res-baseline)))
+        print((res-baseline).abs().max())
 
 
 
