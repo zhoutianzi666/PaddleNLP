@@ -1008,6 +1008,8 @@ class BlockInferencePredictorMixin(BasePredictor):
                 self.model_inputs["pre_ids"][bid, 0] = self.model_inputs["input_ids"][bid][
                     self.seq_lens[bid] - 1
                 ]  # get the last token before padding of this batch
+                if self.config.speculate_method == "inference_with_reference":
+                    self.proposer.input_ids_len[bid, 0] = self.seq_lens[bid]
 
         if self.config.mode == "static":
             for k, v in self.model_inputs.items():
