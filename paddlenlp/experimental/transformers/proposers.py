@@ -278,9 +278,20 @@ class ModelProposer(Proposer):
         # prepare model_inputs
         self.model_inputs = {}
 
-        self.cache_kvs_shape = self.model.get_cache_kvs_shape(self.model.config, self.max_batch_size)
+        self.cache_k_shapes, self.cache_v_shapes = self.model.get_cache_kvs_shape(
+            self.model.config, self.max_batch_size
+        )
         cachekv_dtype = self.dtype if self.config.cachekv_int8_type is None else "uint8"
-        self.cache_kvs = [paddle.zeros(shape, dtype=cachekv_dtype) for shape in self.cache_kvs_shape]
+        self.cache_kvs = []
+        if self.cache_k_shapes and self.cache_v_shapes:
+            assert len(self.cache_k_shapes) == len(self.cache_v_shapes)
+            for cache_k_shape, cache_v_shape in zip(self.cache_k_shapes, self.cache_v_shapes):
+                self.cache_kvs.append(paddle.zeros(cache_k_shape, dtype=cachekv_dtype))
+                self.cache_kvs.append(paddle.zeros(cache_v_shape, dtype=cachekv_dtype))
+        else:
+            # for mla's absorption
+            assert self.cache_v_shapes is None
+            self.cache_kvs = [paddle.zeros(shape, dtype=cachekv_dtype) for shape in self.cache_k_shapes]
 
         self.max_block_nums = self.cache_kvs_shape[0][0]
         self.free_list = list(range(self.max_block_nums))
