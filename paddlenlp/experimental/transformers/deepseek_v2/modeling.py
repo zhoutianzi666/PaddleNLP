@@ -655,7 +655,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     )
                     self.transformer_block.q_b_proj_weights[idx].set_value(q_b_proj_quanted_weight.cuda())
                     self.transformer_block.q_a_layernorm_weights[idx].set_value(q_a_layernorm_weight)
-                    self.transformer_block.q_b_proj_weights_scale[idx].set_value(q_b_proj_weight_scale)
+                    self.transformer_block.q_b_proj_weights_scale[idx].set_value(q_b_proj_weight_scale.cuda())
                 elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                     q_a_proj_quanted_weight = (
                         paddle.to_tensor(
@@ -693,9 +693,11 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 ).cast(dtype)
 
                 if self.use_weight_only:
-                    q_proj_quanted_weight, q_proj_weight_scale = weight_quantize(q_proj_weight, algo=self.quant_algo)
-                    self.transformer_block.q_proj_weights[idx].set_value(q_proj_quanted_weight)
-                    self.transformer_block.q_proj_weights_scale[idx].set_value(q_proj_weight_scale)
+                    q_proj_quanted_weight, q_proj_weight_scale = weight_quantize(
+                        q_proj_weight.cpu(), algo=self.quant_algo, group_size=self.weightonly_group_size
+                    )
+                    self.transformer_block.q_proj_weights[idx].set_value(q_proj_quanted_weight.cuda())
+                    self.transformer_block.q_proj_weights_scale[idx].set_value(q_proj_weight_scale.cuda())
                 elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                     q_proj_quanted_weight, q_proj_weight_scale = block_quant(q_proj_weight, self.weight_block_size)
                     q_proj_quanted_weight = q_proj_quanted_weight.transpose((1, 0)).cast(paddle.float8_e4m3fn)
@@ -822,7 +824,7 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 )
                 self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_quanted_weight.cuda())
                 self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
-                self.transformer_block.kv_b_proj_weights_scale[idx].set_value(kv_b_proj_weight_scale)
+                self.transformer_block.kv_b_proj_weights_scale[idx].set_value(kv_b_proj_weight_scale.cuda())
             elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                 kv_a_proj_with_mqa_quanted_weight = (
                     paddle.to_tensor(
@@ -858,9 +860,11 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 self.transformer_block.kv_b_proj_weights[idx].set_value(kv_b_proj_weight)
 
             if self.use_weight_only:
-                linear_quanted_weight, linear_weight_scale = weight_quantize(linear_weight, algo=self.quant_algo)
-                self.transformer_block.linear_weights[idx].set_value(linear_quanted_weight)
-                self.transformer_block.linear_weights_scale[idx].set_value(linear_weight_scale)
+                linear_quanted_weight, linear_weight_scale = weight_quantize(
+                    linear_weight.cpu(), algo=self.quant_algo, group_size=self.weightonly_group_size
+                )
+                self.transformer_block.linear_weights[idx].set_value(linear_quanted_weight.cuda())
+                self.transformer_block.linear_weights_scale[idx].set_value(linear_weight_scale.cuda())
             elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                 linear_quanted_weight, linear_weight_scale = block_quant(linear_weight, self.weight_block_size)
                 linear_quanted_weight = linear_quanted_weight.transpose((1, 0)).cast(paddle.float8_e4m3fn)
@@ -890,8 +894,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     ffn1_quanted_weight_tensor, ffn1_weight_scale_tensor = weight_quantize(
                         ffn1_weight_tensor.cpu(), algo=self.quant_algo, group_size=self.weightonly_group_size
                     )
-                    self.transformer_block.ffn1_weights[idx].set_value(ffn1_quanted_weight_tensor)
-                    self.transformer_block.ffn1_weights_scale[idx].set_value(ffn1_weight_scale_tensor)
+                    self.transformer_block.ffn1_weights[idx].set_value(ffn1_quanted_weight_tensor.cuda())
+                    self.transformer_block.ffn1_weights_scale[idx].set_value(ffn1_weight_scale_tensor.cuda())
                 elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                     ffn1_quanted_weight_tensor = (
                         paddle.to_tensor(concated_ffn1_weight).transpose((1, 0)).cast(paddle.float8_e4m3fn)
@@ -923,8 +927,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     ffn2_quanted_weight_tensor, ffn2_weight_scale_tensor = weight_quantize(
                         ffn2_weight_tensor.cpu(), algo=self.quant_algo, group_size=self.weightonly_group_size
                     )
-                    self.transformer_block.ffn2_weights[idx].set_value(ffn2_quanted_weight_tensor)
-                    self.transformer_block.ffn2_weights_scale[idx].set_value(ffn2_weight_scale_tensor)
+                    self.transformer_block.ffn2_weights[idx].set_value(ffn2_quanted_weight_tensor.cuda())
+                    self.transformer_block.ffn2_weights_scale[idx].set_value(ffn2_weight_scale_tensor.cuda())
                 elif "fp8" in self.quant_type and self.dyquant_weight_block_size is not None:
                     ffn2_quanted_weight_tensor = (
                         paddle.to_tensor(state_dict[f"{self.base_model_prefix}.layers.{idx}.mlp.down_proj.weight"])
@@ -1538,7 +1542,6 @@ class MTPDeepseekV2ForCausalLMBlockInferenceModel(DeepseekV2ForCausalLMBlockInfe
         pre_caches = kwargs.get("pre_caches", None)
         caches = kwargs.get("caches", None)
 
-        rope_emb = kwargs["rope_emb"]
         seq_lens_this_time = kwargs["seq_lens_this_time"]
         seq_lens_encoder = kwargs["seq_lens_encoder"]
         seq_lens_decoder = kwargs["seq_lens_decoder"]
@@ -1555,7 +1558,7 @@ class MTPDeepseekV2ForCausalLMBlockInferenceModel(DeepseekV2ForCausalLMBlockInfe
         model_inputs = {
             "input_ids": input_ids,
             "src_mask": src_mask,
-            "rope_emb": rope_emb,
+            "rope_emb": None,
             "pre_caches": pre_caches,
             "caches": caches,
             "seq_lens_this_time": seq_lens_this_time,
