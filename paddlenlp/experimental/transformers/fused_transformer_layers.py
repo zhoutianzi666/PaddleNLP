@@ -4984,9 +4984,9 @@ class FusedBlockMultiTransformerFP8DynamicQuant(FusedBlockMultiTransformer):
 
             ln_out_or_q_c_fp8, ln_out_or_q_c_scale = self.dynamic_quant(ln_out_or_q_c)
             compressed_kv = self.cutlass_fp8_gemm(
-                x=ln_out_fp8,
+                x=ln_out_fp8 if self.config.mla_config.q_lora_rank is not None else ln_out_or_q_c_fp8,
                 y=self.kv_a_proj_with_mqa_weights[i],
-                x_s=ln_out_scale,
+                x_s=ln_out_scale if self.config.mla_config.q_lora_rank is not None else ln_out_or_q_c_scale,
                 y_s=self.kv_a_proj_with_mqa_weights_scale[i],
                 bias=None,
                 output_dtype=self._dtype,
