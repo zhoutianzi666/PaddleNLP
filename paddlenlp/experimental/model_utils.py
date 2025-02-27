@@ -423,9 +423,9 @@ class PerTensorWeightScalesLoader:
             self.scale["qkv_weight_scale"] = np.full((num_of_layers), fill_value=-1.0).astype(np.float32)
             for i in range(num_of_layers):
                 qkv_weight_scale = max(
-                    self.scale["q_weight_scale"][i],
-                    self.scale["k_weight_scale"][i],
-                    self.scale["v_weight_scale"][i],
+                    abs(self.scale["q_weight_scale"][i]),
+                    abs(self.scale["k_weight_scale"][i]),
+                    abs(self.scale["v_weight_scale"][i]),
                 )
                 self.scale["qkv_weight_scale"][i] = qkv_weight_scale
 

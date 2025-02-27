@@ -20,6 +20,7 @@ import time
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from threading import Thread
+from typing import List
 
 import numpy as np
 import paddle
@@ -173,6 +174,10 @@ class PredictorArgument:
 
     mla_use_matrix_absorption: bool = field(default=False, metadata={"help": "implement mla with matrix-absorption."})
     weightonly_group_size: int = field(default=-1, metadata={"help": "the max length of candidate tokens."})
+    dyquant_weight_block_size: List[int] = field(
+        default=None,
+        metadata={"help": "Quantitative granularity of weights. Supported values: [0, 0], [128, 128]"},
+    )
 
     def __post_init__(self):
         if self.speculate_method is not None:
