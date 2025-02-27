@@ -174,8 +174,8 @@ class PredictorArgument:
 
     mla_use_matrix_absorption: bool = field(default=False, metadata={"help": "implement mla with matrix-absorption."})
     weightonly_group_size: int = field(default=-1, metadata={"help": "the max length of candidate tokens."})
-    dyquant_weight_block_size: List[int] = field(
-        default=None,
+    weight_block_size: List[int] = field(
+        default_factory=lambda: [128, 128],
         metadata={"help": "Quantitative granularity of weights. Supported values: [0, 0], [128, 128]"},
     )
 
