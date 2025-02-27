@@ -1,5 +1,4 @@
-# Copyright (c) 2023 PaddlePaddle Authors. All Rights Reserved.
-# Copyright 2023 PKU-Alignment Team. All Rights Reserved.
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,31 +11,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Stanford Alpaca dataset for supervised instruction fine-tuning."""
-
-from __future__ import annotations
 
 from datasets import load_dataset
 
 from .base import RawDataset, RawSample
 
-__all__ = ["AlpacaDataset"]
+__all__ = ["JsonDataset"]
 
 
-class AlpacaDataset(RawDataset):
-    NAME: str = "alpaca"
-    ALIASES: tuple[str, ...] = ("stanford-alpaca",)
+class JsonDataset(RawDataset):
+    NAME: str = "Jsonfile"
 
     def __init__(self, path: str | None = None, *args, **kwargs) -> None:
-        self.data = load_dataset(path or "tatsu-lab/alpaca", split="train")
+        self.data = load_dataset("json", data_files=path, split="train")
+        self.use_rm_server = kwargs.pop("use_rm_server", False)
+        assert "src" in self.data.column_names, "'src' should be included in jsonfile"
+        if self.use_rm_server:
+            assert "tgt" in self.data.column_names, "'tgt' should be included in jsonfile when using rm server"
 
     def __getitem__(self, index: int) -> RawSample:
         data = self.data[index]
-        input = (  # pylint: disable=redefined-builtin
-            " ".join((data["instruction"], data["input"])) if data["input"] else data["instruction"]
-        )
-        answer = data["output"]
-        return RawSample(input=input, answer=answer)
+        if self.use_rm_server:
+            rawdata = RawSample(
+                input=data["src"],
+                answer=data["tgt"],
+            )
+        else:
+            rawdata = RawSample(input=data["src"])
+        return rawdata
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.data)  # dataset size
