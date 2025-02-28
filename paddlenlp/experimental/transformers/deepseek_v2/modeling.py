@@ -22,6 +22,7 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn.quant import weight_quantize
 
+from paddlenlp.experimental.model_utils import block_quant_to_fp8, get_dequant_weight
 from paddlenlp.experimental.transformers.fused_transformer_layers import (
     FusedBlockMultiTransformer,
     FusedBlockMultiTransformerFP8DynamicQuant,
@@ -150,32 +151,6 @@ class DeepseekV2RMSNorm(nn.Layer):
 
     def forward(self, x):
         return paddle.incubate.nn.functional.fused_rms_norm(x, self.weight, None, self.eps, begin_norm_axis=1)[0]
-
-
-def block_quant(input_tensor, weight_block_size=[128, 128]):
-    assert (
-        weight_block_size[0] == 128 and weight_block_size[1] == 128
-    ), f"Expected weight_block_size == [128, 128], but got {weight_block_size}"
-    n, k = input_tensor.shape
-    block_size_n, block_size_k = weight_block_size
-    num_blocks_rows = (n + block_size_n - 1) // block_size_n
-    num_blocks_cols = (k + block_size_k - 1) // block_size_k
-    quant_data = paddle.zeros([n, k], dtype=paddle.float32)
-    quant_scale = paddle.ones([num_blocks_rows, num_blocks_cols], dtype=paddle.float32)
-    tensor_fp32 = paddle.cast(input_tensor, paddle.float32)
-    for row in range(quant_scale.shape[0]):
-        start_row = row * block_size_n
-        end_row = min((row + 1) * block_size_n, n)
-        for col in range(quant_scale.shape[1]):
-            start_col = col * block_size_k
-            end_col = min((col + 1) * block_size_k, k)
-            data = tensor_fp32[start_row:end_row, start_col:end_col]
-            max_val = data.abs().max()
-            scale = max_val.clip(0.000001) / 448.0
-            quant_scale[row, col] = scale
-            quant_val = paddle.clip(data / scale, min=-448.0, max=448.0)
-            quant_data[start_row:end_row, start_col:end_col] = quant_val
-    return quant_data, quant_scale
 
 
 @register_base_model
@@ -730,6 +705,20 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
 
             if self.config.mla_use_matrix_absorption:
                 if self.config.q_lora_rank is None:
+                    if "fp8" in self.quant_type:
+                        q_proj_quanted_weight = paddle.to_tensor(
+                            state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_proj.weight"]
+                        ).cast(paddle.float8_e4m3fn)
+                        q_proj_weight_scale = paddle.to_tensor(
+                            state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_proj.weight_scale_inv"]
+                        ).cast(paddle.float32)
+                        q_proj_weight = get_dequant_weight(
+                            q_proj_quanted_weight,
+                            q_proj_weight_scale,
+                            dtype=dtype,
+                            weight_block_size=self.weight_block_size,
+                        )
+
                     q_proj_weight_inner = q_proj_weight.reshape(
                         shape=[
                             -1,
@@ -738,12 +727,50 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                         ]
                     )
                 else:
+                    if "fp8" in self.quant_type:
+                        q_b_proj_quanted_weight = paddle.to_tensor(
+                            state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight"]
+                        ).cast(paddle.float8_e4m3fn)
+                        q_b_proj_weight_scale = paddle.to_tensor(
+                            state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.q_b_proj.weight_scale_inv"]
+                        ).cast(paddle.float32)
+                        q_b_proj_weight = get_dequant_weight(
+                            q_b_proj_quanted_weight,
+                            q_b_proj_weight_scale,
+                            dtype=dtype,
+                            weight_block_size=self.weight_block_size,
+                        )
+
                     q_proj_weight_inner = q_b_proj_weight.reshape(
                         shape=[
                             -1,
                             self.num_attention_heads // self.config.tensor_parallel_degree,
                             self.config.qk_nope_head_dim + self.config.qk_rope_head_dim,
                         ]
+                    )
+
+                if "fp8" in self.quant_type:
+                    kv_b_proj_weight = paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"]
+                    ).cast(paddle.float8_e4m3fn)
+                    kv_b_proj_weight_scale = paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight_scale_inv"]
+                    ).cast(paddle.float32)
+                    kv_b_proj_weight = get_dequant_weight(
+                        kv_b_proj_weight, kv_b_proj_weight_scale, dtype=dtype, weight_block_size=self.weight_block_size
+                    )
+
+                    linear_quanted_weight = paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight"]
+                    ).cast(paddle.float8_e4m3fn)
+                    linear_weight_scale = paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight_scale_inv"]
+                    ).cast(paddle.float32)
+                    linear_weight = get_dequant_weight(
+                        linear_quanted_weight,
+                        linear_weight_scale,
+                        dtype=dtype,
+                        weight_block_size=self.weight_block_size,
                     )
 
                 # kv_b_proj_weights: [kv_lora_rank, (qk_nope_head_dim + v_head_dim) * num_heads]
@@ -789,9 +816,9 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.v_b_o_proj_weights[idx].set_value(W_UV_O_quanted.cuda())
                     self.transformer_block.v_b_o_proj_weights_scale[idx].set_value(W_UV_O_scale.cuda())
                 elif "fp8" in self.quant_type:
-                    W_Q_UK_quanted, W_Q_UK_scale = block_quant(paddle.to_tensor(W_Q_UK), self.weight_block_size)
-                    W_QR_quanted, W_QR_scale = block_quant(paddle.to_tensor(W_QR), self.weight_block_size)
-                    W_UV_O_quanted, W_UV_O_scale = block_quant(paddle.to_tensor(W_UV_O), self.weight_block_size)
+                    W_Q_UK_quanted, W_Q_UK_scale = block_quant_to_fp8(paddle.to_tensor(W_Q_UK), self.weight_block_size)
+                    W_QR_quanted, W_QR_scale = block_quant_to_fp8(paddle.to_tensor(W_QR), self.weight_block_size)
+                    W_UV_O_quanted, W_UV_O_scale = block_quant_to_fp8(paddle.to_tensor(W_UV_O), self.weight_block_size)
                     self.transformer_block.q_nope_k_b_proj_weights[idx].copy_(
                         paddle.to_tensor(W_Q_UK_quanted).transpose((1, 0)).cast(paddle.float8_e4m3fn), False
                     )
@@ -849,16 +876,23 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     .transpose((1, 0))
                     .cast(paddle.float32)
                 )
-                self.transformer_block.kv_a_proj_with_mqa_weights[idx].copy_(kv_a_proj_with_mqa_quanted_weight)
+                self.transformer_block.kv_a_proj_with_mqa_weights[idx].copy_(kv_a_proj_with_mqa_quanted_weight, False)
                 self.transformer_block.kv_a_proj_with_mqa_weights_scale[idx].set_value(kv_a_proj_with_mqa_weight_scale)
 
                 self.transformer_block.kv_a_layernorm_weights[idx].set_value(kv_a_layernorm_weight)
 
-                kv_b_proj_quanted_weight, kv_b_proj_weight_scale = block_quant(
-                    kv_b_proj_weight, self.weight_block_size
+                kv_b_proj_quanted_weight = (
+                    paddle.to_tensor(state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight"])
+                    .transpose((1, 0))
+                    .cast(paddle.float8_e4m3fn)
                 )
-                kv_b_proj_quanted_weight = kv_b_proj_quanted_weight.transpose((1, 0)).cast(paddle.float8_e4m3fn)
-                kv_b_proj_weight_scale = kv_b_proj_weight_scale.transpose((1, 0)).cast(paddle.float32)
+                kv_b_proj_weight_scale = (
+                    paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.kv_b_proj.weight_scale_inv"]
+                    )
+                    .transpose((1, 0))
+                    .cast(paddle.float32)
+                )
                 self.transformer_block.kv_b_proj_weights[idx].copy_(kv_b_proj_quanted_weight, False)
                 self.transformer_block.kv_b_proj_weights_scale[idx].set_value(kv_b_proj_weight_scale)
             else:
@@ -873,9 +907,18 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                 self.transformer_block.linear_weights[idx].set_value(linear_quanted_weight.cuda())
                 self.transformer_block.linear_weights_scale[idx].set_value(linear_weight_scale.cuda())
             elif "fp8" in self.quant_type:
-                linear_quanted_weight, linear_weight_scale = block_quant(linear_weight, self.weight_block_size)
-                linear_quanted_weight = linear_quanted_weight.transpose((1, 0)).cast(paddle.float8_e4m3fn)
-                linear_weight_scale = linear_weight_scale.transpose((1, 0)).cast(paddle.float32)
+                linear_quanted_weight = (
+                    paddle.to_tensor(state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight"])
+                    .transpose((1, 0))
+                    .cast(paddle.float8_e4m3fn)
+                )
+                linear_weight_scale = (
+                    paddle.to_tensor(
+                        state_dict[f"{self.base_model_prefix}.layers.{idx}.self_attn.o_proj.weight_scale_inv"]
+                    )
+                    .transpose((1, 0))
+                    .cast(paddle.float32)
+                )
                 self.transformer_block.linear_weights[idx].copy_(linear_quanted_weight, False)
                 self.transformer_block.linear_weights_scale[idx].set_value(linear_weight_scale)
             else:
@@ -988,8 +1031,23 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                         ffn1_scales.append(ffn1_weight_scale)
                         ffn2_scales.append(ffn2_weight_scale)
                     elif "fp8" in self.quant_type:
-                        ffn1_quanted_weight = ffn1_weight.transpose((1, 0))
-                        ffn2_quanted_weight = ffn2_weight.transpose((1, 0))
+                        concated_gate_up_weight = np.concatenate(
+                            [
+                                state_dict[
+                                    f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.gate_proj.weight"
+                                ],
+                                state_dict[
+                                    f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.up_proj.weight"
+                                ],
+                            ],
+                            axis=-1,
+                        )
+                        ffn1_quanted_weight = paddle.to_tensor(concated_gate_up_weight).transpose((1, 0))
+                        ffn2_quanted_weight = paddle.to_tensor(
+                            state_dict[
+                                f"{self.base_model_prefix}.layers.{idx}.mlp.experts.{expert_idx}.down_proj.weight"
+                            ]
+                        ).transpose((1, 0))
 
                         concated_gate_up_weight_scale = np.concatenate(
                             [
@@ -1014,8 +1072,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                             .transpose((1, 0))
                             .cast(paddle.float32)
                         )
-                        ffn1_weights.append(ffn1_quanted_weight)
-                        ffn2_weights.append(ffn2_quanted_weight)
+                        ffn1_weights.append(ffn1_quanted_weight.view(paddle.uint8))
+                        ffn2_weights.append(ffn2_quanted_weight.view(paddle.uint8))
                         ffn1_scales.append(ffn1_weight_scale)
                         ffn2_scales.append(ffn2_weight_scale)
                     else:
@@ -1040,8 +1098,8 @@ class DeepseekV2BlockInferenceModel(DeepseekV2PretrainedModel):
                     self.transformer_block.ffn1_weights[idx].set_value(fused_moe_ffn1_weight)
                     self.transformer_block.ffn2_weights[idx].set_value(fused_moe_ffn2_weight)
                 elif "fp8" in self.quant_type:
-                    fused_moe_ffn1_weight_quant = fused_moe_ffn1_weight.cast(paddle.float8_e4m3fn)
-                    fused_moe_ffn2_weight_quant = fused_moe_ffn2_weight.cast(paddle.float8_e4m3fn)
+                    fused_moe_ffn1_weight_quant = paddle.to_tensor(ffn1_weights).view(paddle.float8_e4m3fn)
+                    fused_moe_ffn2_weight_quant = paddle.to_tensor(ffn2_weights).view(paddle.float8_e4m3fn)
                     self.transformer_block.ffn1_weights[idx].copy_(fused_moe_ffn1_weight_quant, False)
                     self.transformer_block.ffn2_weights[idx].copy_(fused_moe_ffn2_weight_quant, False)
                 else:
@@ -1326,24 +1384,43 @@ class DeepseekV2ForCausalLMBlockInferenceModel(GenerationBlockInferenceModel, De
                 # Row Linear
                 "embed_tokens.weight": partial(fn, is_column=False),
                 "layers.0.self_attn.o_proj.weight": partial(fn, is_column=False),
+                "layers.0.self_attn.o_proj.weight_scale_inv": partial(fn, is_column=False),
             }
 
             # Column Linear
             base_actions["layers.0.self_attn.q_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.self_attn.q_b_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.self_attn.kv_b_proj.weight"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.q_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.kv_b_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.self_attn.q_b_proj.weight_scale_inv"] = partial(fn, is_column=True)
 
             base_actions["layers.0.mlp.gate_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.up_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.down_proj.weight"] = partial(fn, is_column=False)
+            base_actions["layers.0.mlp.gate_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.up_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.down_proj.weight_scale_inv"] = partial(fn, is_column=False)
 
             for expert_idx in range(config.n_routed_experts):
                 base_actions[f"layers.0.mlp.experts.{expert_idx}.up_proj.weight"] = partial(fn, is_column=True)
                 base_actions[f"layers.0.mlp.experts.{expert_idx}.gate_proj.weight"] = partial(fn, is_column=True)
                 base_actions[f"layers.0.mlp.experts.{expert_idx}.down_proj.weight"] = partial(fn, is_column=False)
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.up_proj.weight_scale_inv"] = partial(
+                    fn, is_column=True
+                )
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.gate_proj.weight_scale_inv"] = partial(
+                    fn, is_column=True
+                )
+                base_actions[f"layers.0.mlp.experts.{expert_idx}.down_proj.weight_scale_inv"] = partial(
+                    fn, is_column=False
+                )
             base_actions["layers.0.mlp.shared_experts.up_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.shared_experts.gate_proj.weight"] = partial(fn, is_column=True)
             base_actions["layers.0.mlp.shared_experts.down_proj.weight"] = partial(fn, is_column=False)
+            base_actions["layers.0.mlp.shared_experts.up_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.shared_experts.gate_proj.weight_scale_inv"] = partial(fn, is_column=True)
+            base_actions["layers.0.mlp.shared_experts.down_proj.weight_scale_inv"] = partial(fn, is_column=False)
 
             # MTP parts
             base_actions["layers.61.embed_tokens.weight"] = partial(fn, is_column=False)

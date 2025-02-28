@@ -4717,44 +4717,49 @@ class FusedBlockMultiTransformerFP8DynamicQuant(FusedBlockMultiTransformer):
                 x_q, x_s = self.dynamic_quant(x)
             else:
                 x_q = x
-            x_s = x_s.item()
+            try:
+                from paddlenlp_ops import (
+                    cutlass_fp8_fp8_half_gemm_ptr_scale_fused as fp8_gemm_fused_ptr_scale,
+                )
+            except:
+                assert False, "fp8_gemm_fused_ptr_scale only supported on sm90"
             if ffn1:
                 n, k = y.shape
                 y_0 = y[: n // 2, :]
                 y_1 = y[n // 2 :, :]
-                y_s_0 = y_s[0, 0].item()
-                y_s_1 = y_s[1, 0].item()
-                out_0 = fp8_gemm_fused(
+                y_s_0 = y_s[0, 0]
+                y_s_1 = y_s[1, 0]
+                out_0 = fp8_gemm_fused_ptr_scale(
                     x=x_q,
                     y=y_0,
+                    x_scale=x_s,
+                    y_scale=y_s_0,
                     bias=bias,
                     transpose_x=False,
                     transpose_y=True,
-                    scale=x_s * y_s_0,
                     output_dtype=output_dtype,
-                    act=act,
                 )
-                out_1 = fp8_gemm_fused(
+                out_1 = fp8_gemm_fused_ptr_scale(
                     x=x_q,
                     y=y_1,
-                    bias=None,
+                    x_scale=x_s,
+                    y_scale=y_s_1,
+                    bias=bias,
                     transpose_x=False,
                     transpose_y=True,
-                    scale=x_s * y_s_1,
                     output_dtype=output_dtype,
-                    act=act,
                 )
                 out = paddle.concat([out_0, out_1], axis=-1)
             else:
-                out = fp8_gemm_fused(
+                out = fp8_gemm_fused_ptr_scale(
                     x=x_q,
                     y=y,
-                    bias=None,
+                    x_scale=x_s,
+                    y_scale=y_s,
+                    bias=bias,
                     transpose_x=False,
                     transpose_y=True,
-                    scale=x_s * y_s[0, 0].item(),
                     output_dtype=output_dtype,
-                    act="identity",
                 )
         else:
             if x_s is None:
