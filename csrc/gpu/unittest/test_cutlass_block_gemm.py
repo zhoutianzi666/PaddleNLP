@@ -108,11 +108,11 @@ class CutlassBlockGemmTest(unittest.TestCase):
             bias=None,
             transpose_x=False,
             transpose_y=True,
-            output_dtype="float16",
+            output_dtype=output_dtype,
             act="identity",
         )
 
-        np.testing.assert_allclose(ref_out.numpy(), out.numpy(), rtol=1e-2, atol=1e-2)
+        np.testing.assert_allclose(ref_out.numpy(), out.numpy(), rtol=1e-3, atol=1e-3)
 
 
 if __name__ == "__main__":
