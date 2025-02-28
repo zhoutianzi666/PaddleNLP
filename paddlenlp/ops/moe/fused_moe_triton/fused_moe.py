@@ -145,47 +145,35 @@ def _per_token_group_quant_fp8(
 @paddle_use_triton(
     key=["1"],
 )
-def _per_token_group_quant_fp8_kernel(
-    # Pointers to inputs and output
+def _per_token_group_quant_fp8_zkk(
     y_ptr,
     y_q_ptr,
     y_s_ptr,
-    # Stride of input
-    y_stride,
-    # Collums of input
-    N,
-    # Avoid to divide zero
-    M,
+    num_rows,
     eps,
-    # Information for float8
     fp8_min,
     fp8_max,
-    # Meta-parameters
-    BLOCK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
-    """A Triton-accelerated function to perform per-token-group quantization on a
-    tensor.
+    start_row = tl.program_id(0) * BLOCK_M
+    
+    rows = tl.arange(0, BLOCK_M) + start_row
+    cols = tl.arange(0, BLOCK_N)
+    y_ptrs = y_ptr + rows[:, None] * BLOCK_N + cols[None,:]
+    mask = rows[:,None] < num_rows
 
-    This function converts the tensor values into float8 values.
-    """
-    # Map the program id to the row of X and Y it should compute.
-    g_id = tl.program_id(0)
-    y_ptr += g_id * y_stride
-    y_q_ptr += g_id * y_stride
-    y_s_ptr += g_id
-
-    cols = tl.arange(0, BLOCK)  # N <= BLOCK
-    mask = cols < N
-
-    y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    y = tl.load(y_ptrs, mask=mask, other=0.0).to(tl.float32)
     # Quant
-    _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
+    _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
     y_s = _absmax / fp8_max
-    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+    y_q = tl.clamp(y / y_s[:,None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-    tl.store(y_q_ptr + cols, y_q, mask=mask)
-    tl.store(y_s_ptr, y_s)
 
+    y_q_ptrs = y_q_ptr + rows[:, None] * BLOCK_N + cols[None,:]
+    tl.store(y_q_ptrs, y_q, mask=mask)
+    y_s_ptrs = y_s_ptr + rows
+    tl.store(y_s_ptrs, y_s)
 
 def per_token_group_quant_fp8(
     x,
@@ -244,11 +232,10 @@ def per_token_group_quant_fp8_api(
     fp8_max, fp8_min = 448.0, -448.0
     assert len(x.shape) == 2
 
-    N = group_size
-
-    BLOCK = triton.next_power_of_2(N)
+    assert group_size == 128
+    BLOCK_N = triton.next_power_of_2(group_size)
     # heuristics for number of warps
-    num_warps = min(max(BLOCK // 256, 1), 8)
+    num_warps = min(max(BLOCK_N // 256, 1), 8)
     num_stages = 1
 
     config = {
@@ -256,21 +243,18 @@ def per_token_group_quant_fp8_api(
         "num_stages": num_stages,
     }
 
-    op_name = "per_token_group_quant_fp8"
+    op_name = "per_token_group_quant_fp8_api"
     op_name += f"{get_dtype_str(x.dtype)}"
-    op_name += f"_{N}"
+    op_name += f"_{group_size}"
 
     prepare_attr_for_triton_kernel = """
-    int y_stride =  group_size;
-    int N = group_size;
-    int M = x.shape()[0] * x.shape()[1] / group_size;
+    int num_rows = x.shape()[0] * x.shape()[1] / group_size;
     float fp8_max = 448.0;
     float fp8_min = -448.0;
     """
 
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         x_q = paddle.empty(x.shape, dtype=paddle.float8_e4m3fn)
-        M = x.shape[0] * x.shape[1] // group_size
         x_s = paddle.empty(
             [x.shape[0], x.shape[-1] // group_size],
             dtype=paddle.float32,
@@ -297,19 +281,19 @@ def per_token_group_quant_fp8_api(
             return_tensor_names,
             d2s_infer_code,
         )
-        grid = ("M",)
+        grid = ("(num_rows + BLOCK_M - 1)/BLOCK_M",)
+        BLOCK_M = 8
 
-        _per_token_group_quant_fp8_kernel[(op_name, template_used, grid, [config])](
+        _per_token_group_quant_fp8_zkk[(op_name, template_used, grid, [config])](
             x,
             x_q,
             x_s,
-            group_size,
-            N,
             -1,
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            BLOCK=BLOCK,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N
         )
     if in_dynamic_or_pir_mode():
         outs = _C_ops._run_custom_op(op_name, x, group_size, eps)
