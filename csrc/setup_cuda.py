@@ -168,6 +168,7 @@ if cc == 89 and cuda_version >= 12.4:
 
 if cc >= 90 and cuda_version >= 12.0:
     os.system("python utils/auto_gen_fp8_fp8_gemm_fused_kernels_sm90.py --cuda_arch 90")
+    os.system("python utils/auto_gen_fp8_fp8_gemm_fused_kernels_ptr_scale_sm90.py --cuda_arch 90")
     os.system("python utils/auto_gen_fp8_fp8_dual_gemm_fused_kernels_sm90.py --cuda_arch 90")
     os.system("python utils/auto_gen_fp8_fp8_block_gemm_fused_kernels_sm90.py --cuda_arch 90")
     sources += find_end_files(fp8_auto_gen_directory, ".cu")

@@ -24,4 +24,6 @@
 
 bool fp8_fp8_gemm_scale_bias_act(GemmEpilogueAllParams params);
 
+bool fp8_fp8_gemm_ptr_scale_bias_act(GemmEpilogueAllParams params);
+
 bool fp8_fp8_block_gemm_scale_bias_act(GemmEpilogueAllParams params);

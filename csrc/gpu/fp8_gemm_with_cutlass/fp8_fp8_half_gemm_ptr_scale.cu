@@ -17,7 +17,7 @@
 
 #include "cutlass/cutlass.h"
 
-#include "fp8_gemm_fused/fuse_gemm_act_template_3x.h"
+#include "fp8_gemm_fused/fp8_fp8_gemm_scale_bias_act.h"
 
 
 std::vector<paddle::Tensor> cutlass_fp8_fp8_half_gemm_ptr_scale(
@@ -143,49 +143,7 @@ std::vector<paddle::Tensor> cutlass_fp8_fp8_half_gemm_ptr_scale(
                                     0,
                                     x_scale_ptr,
                                     y_scale_ptr};
-  using namespace cute;
-  if (bias){
-    if (output_dtype == "float16"){
-      dispatch_fp8_gemm_ptr_scale_sm90<phi::dtype::float8_e4m3fn,
-                                    phi::dtype::float16,
-                                    true,
-                                    Shape<_128, _128, _128>,
-                                    Shape<_2, _1, _1>,
-                                    cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum,
-                                    cutlass::epilogue::TmaWarpSpecialized,
-                                    cutlass::arch::Sm90>(params);
-    }else{
-      dispatch_fp8_gemm_ptr_scale_sm90<phi::dtype::float8_e4m3fn,
-                                    phi::dtype::bfloat16,
-                                    true,
-                                    Shape<_128, _128, _128>,
-                                    Shape<_2, _1, _1>,
-                                    cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum,
-                                    cutlass::epilogue::TmaWarpSpecialized,
-                                    cutlass::arch::Sm90>(params);
-    }
-  }else{
-    if (output_dtype == "float16"){
-      dispatch_fp8_gemm_ptr_scale_sm90<phi::dtype::float8_e4m3fn,
-                                    phi::dtype::float16,
-                                    false,
-                                    Shape<_128, _128, _128>,
-                                    Shape<_2, _1, _1>,
-                                    cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum,
-                                    cutlass::epilogue::TmaWarpSpecialized,
-                                    cutlass::arch::Sm90>(params);
-    }else{
-        dispatch_fp8_gemm_ptr_scale_sm90<phi::dtype::float8_e4m3fn,
-                                    phi::dtype::bfloat16,
-                                    false,
-                                    Shape<_128, _128, _128>,
-                                    Shape<_2, _1, _1>,
-                                    cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum,
-                                    cutlass::epilogue::TmaWarpSpecialized,
-                                    cutlass::arch::Sm90>(params);
-    }
-  }
-  
+  fp8_fp8_gemm_ptr_scale_bias_act(params);
   return {out};
 }
 
