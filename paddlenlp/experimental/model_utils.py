@@ -466,3 +466,53 @@ class CacheScaleLoader:
                     self.scale[scale_type_out][i, :] = [
                         1.0 / self.scale[scale_type][i, j] for j in range(0, num_key_value_heads)
                     ]
+
+
+def get_dequant_weight(w, w_s=None, dtype=None, weight_block_size=[128, 128]):
+    if w_s is None:
+        return w
+
+    assert weight_block_size == [128, 128]
+    from paddlenlp_ops import group_quant
+
+    try:
+        from paddlenlp_ops import (
+            cutlass_fp8_fp8_half_block_gemm_fused as fp8_block_gemm_fused,
+        )
+    except:
+        assert False, "fp8_block_gemm_fused only supported on sm90"
+
+    eye = paddle.eye(w.shape[0], dtype=paddle.float32)
+    x_q, x_s = group_quant(
+        eye, group_size=weight_block_size[1], transpose_scale=True, quant_max_bound=448.0, quant_min_bound=-448.0
+    )
+    out = fp8_block_gemm_fused(
+        x_q,
+        w.t(),
+        x_s,
+        w_s.t(),
+        bias=None,
+        transpose_x=False,
+        transpose_y=True,
+        output_dtype=dtype,
+        act="identity",
+    )
+    return out
+
+
+def cell_div(x, y):
+    return (x + y - 1) // y
+
+
+def block_quant_to_fp8(x: paddle.Tensor, weight_block_size=[128, 128], eps=1e-6):
+    assert weight_block_size == [128, 128]
+    assert x.ndim == 2
+    m, n = x.shape
+    x_padded = paddle.zeros((cell_div(m, 128) * 128, cell_div(n, 128) * 128), dtype=x.dtype)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view([-1, 128, x_padded.shape[1] // 128, 128])
+    x_amax = x_view.cast(paddle.float32).abs().max(axis=[1, 3], keepdim=True).clip(min=eps)
+    x_scaled = (x_view * (448.0 / x_amax)).to(paddle.float8_e4m3fn)
+    x_q = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    x_s = (x_amax / 448.0).view([x_view.shape[0], x_view.shape[2]])
+    return x_q.cast(paddle.float8_e4m3fn), x_s
