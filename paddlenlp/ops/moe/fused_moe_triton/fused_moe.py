@@ -149,19 +149,21 @@ def _per_token_group_quant_fp8_zkk(
     y_ptr,
     y_q_ptr,
     y_s_ptr,
+    flatten_num_blocks,
     num_rows,
     eps,
     fp8_min,
     fp8_max,
+    TRANSPOSE_SCALE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    start_row = tl.program_id(0) * BLOCK_M
+    start_block = tl.program_id(0) * BLOCK_M
     
-    rows = tl.arange(0, BLOCK_M) + start_row
-    cols = tl.arange(0, BLOCK_N)
-    y_ptrs = y_ptr + rows[:, None] * BLOCK_N + cols[None,:]
-    mask = rows[:,None] < num_rows
+    blocks = tl.arange(0, BLOCK_M) + start_block
+    groups = tl.arange(0, BLOCK_N)
+    y_ptrs = y_ptr + blocks[:, None] * BLOCK_N + groups[None,:]
+    mask = blocks[:,None] < flatten_num_blocks
 
     y = tl.load(y_ptrs, mask=mask, other=0.0).to(tl.float32)
     # Quant
@@ -170,10 +172,17 @@ def _per_token_group_quant_fp8_zkk(
     y_q = tl.clamp(y / y_s[:,None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
 
-    y_q_ptrs = y_q_ptr + rows[:, None] * BLOCK_N + cols[None,:]
+    y_q_ptrs = y_q_ptr + blocks[:, None] * BLOCK_N + groups[None,:]
     tl.store(y_q_ptrs, y_q, mask=mask)
-    y_s_ptrs = y_s_ptr + rows
-    tl.store(y_s_ptrs, y_s)
+    if TRANSPOSE_SCALE:
+        col_blocks = flatten_num_blocks // num_rows
+        new_rows = blocks // col_blocks
+        new_cols = blocks % col_blocks
+        y_s_ptrs = y_s_ptr + new_rows + new_cols * num_rows
+        tl.store(y_s_ptrs, y_s)
+    else:
+        y_s_ptrs = y_s_ptr + blocks
+        tl.store(y_s_ptrs, y_s)
 
 def per_token_group_quant_fp8(
     x,
@@ -213,8 +222,14 @@ def per_token_group_quant_fp8(
 
 d2s_infer_code = """
 std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& x,
-                                                        int64_t group_size,float eps) {
+                                                        int64_t group_size,
+                                                        bool transpose_scale,
+                                                        float eps) {
     std::vector<int64_t> x_s_shape = {x[0], x[1] / group_size};
+    if (transpose_scale) {
+        x_s_shape = {x[1] / group_size, x[0]};
+    }
+
     return {x, x_s_shape};
 }
 std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
@@ -227,10 +242,12 @@ std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dt
 def per_token_group_quant_fp8_api(
     x,
     group_size=-1,
+    transpose_scale=False,
     eps=1e-10,
 ):
     fp8_max, fp8_min = 448.0, -448.0
     assert len(x.shape) == 2
+    assert x.shape[-1] % group_size == 0
 
     assert group_size == 128
     BLOCK_N = triton.next_power_of_2(group_size)
@@ -246,9 +263,11 @@ def per_token_group_quant_fp8_api(
     op_name = "per_token_group_quant_fp8_api"
     op_name += f"{get_dtype_str(x.dtype)}"
     op_name += f"_{group_size}"
+    op_name += f"_{transpose_scale}"
 
     prepare_attr_for_triton_kernel = """
-    int num_rows = x.shape()[0] * x.shape()[1] / group_size;
+    int flatten_num_blocks = x.shape()[0] * x.shape()[1] / group_size;
+    int num_rows = x.shape()[0];
     float fp8_max = 448.0;
     float fp8_min = -448.0;
     """
@@ -262,8 +281,12 @@ def per_token_group_quant_fp8_api(
 
         prepare_ptr_for_triton_kernel = """
         auto x_q = paddle::empty(x.shape(), paddle::DataType::FLOAT8_E4M3FN, x.place());
+        std::vector<int64_t> scale_shape = {x.shape()[0], x.shape()[1] / group_size};
+        if (transpose_scale) {
+            scale_shape = {x.shape()[1] / group_size, x.shape()[0]};
+        }
         auto x_s = paddle::empty(
-            {x.shape()[0], x.shape()[1] / group_size},
+            scale_shape,
             paddle::DataType::FLOAT32,
             x.place());
 
@@ -281,7 +304,7 @@ def per_token_group_quant_fp8_api(
             return_tensor_names,
             d2s_infer_code,
         )
-        grid = ("(num_rows + BLOCK_M - 1)/BLOCK_M",)
+        grid = ("(flatten_num_blocks + BLOCK_M - 1)/BLOCK_M",)
         BLOCK_M = 8
 
         _per_token_group_quant_fp8_zkk[(op_name, template_used, grid, [config])](
@@ -289,14 +312,16 @@ def per_token_group_quant_fp8_api(
             x_q,
             x_s,
             -1,
+            -1,
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
+            TRANSPOSE_SCALE = (int)(transpose_scale),
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N
         )
     if in_dynamic_or_pir_mode():
-        outs = _C_ops._run_custom_op(op_name, x, group_size, eps)
+        outs = _C_ops._run_custom_op(op_name, x, group_size, transpose_scale, eps)
         return outs[0], outs[1]
     else:
         helper = LayerHelper(op_name, **locals())
@@ -308,6 +333,7 @@ def per_token_group_quant_fp8_api(
         outputs = {"x_q": x_q, "x_s": x_s}
         attrs = {
             "group_size": group_size,
+            "transpose_scale": transpose_scale,
             "eps": eps,
         }
         helper.append_op(
