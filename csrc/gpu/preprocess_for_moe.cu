@@ -108,7 +108,7 @@ std::vector<paddle::Tensor> preprocess_for_moe_kernel(const paddle::Tensor& topk
 
     int max_num_m_blocks = max_num_tokens_padded / block_size;
     
-    auto expert_ids = paddle::zeros(
+    auto expert_ids = paddle::empty(
         {max_num_m_blocks}, paddle::DataType::INT32, 
         topk_ids.place()
     );
@@ -119,7 +119,7 @@ std::vector<paddle::Tensor> preprocess_for_moe_kernel(const paddle::Tensor& topk
          topk_ids.place()
     );
 
-    auto cumsum_buffer = paddle::zeros(
+    auto cumsum_buffer = paddle::empty(
         {num_experts + 1}, 
         paddle::DataType::INT32, 
         topk_ids.place()
@@ -128,12 +128,22 @@ std::vector<paddle::Tensor> preprocess_for_moe_kernel(const paddle::Tensor& topk
     auto stream = topk_ids.stream();
     using scalar_t = int64_t;
 
+    # define run_align_kernel(num_experts) \
+    auto align_kernel = moe_align_block_size_kernel<scalar_t, num_experts>; \
+    align_kernel<<<1, 1024, 0, stream>>>( \
+    topk_ids.data<scalar_t>(),  \
+    expert_ids.data<int32_t>(), \
+    num_tokens_post_pad.data<int32_t>(), \
+    block_size,  \
+    topk_ids_numel, \
+    cumsum_buffer.data<int32_t>());
+    
     if (num_experts == 8) {
-      auto align_kernel = moe_align_block_size_kernel<scalar_t, 8>;
-      align_kernel<<<1, 1024, 0, stream>>>(topk_ids.data<scalar_t>(),  expert_ids.data<int32_t>(), num_tokens_post_pad.data<int32_t>(), block_size,  topk_ids_numel, cumsum_buffer.data<int32_t>());
+      run_align_kernel(8);
     } else if (num_experts == 256) {
-      auto align_kernel = moe_align_block_size_kernel<scalar_t, 256>;
-      align_kernel<<<1, 1024, 0, stream>>>(topk_ids.data<scalar_t>(),  expert_ids.data<int32_t>(), num_tokens_post_pad.data<int32_t>(), block_size,  topk_ids_numel, cumsum_buffer.data<int32_t>());
+      run_align_kernel(256);
+    } else if (num_experts == 2) {
+      run_align_kernel(2);
     } else {
       printf("errors");
     }
